@@ -350,7 +350,7 @@ class AggregatorClient(fl.client.NumPyClient):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HFL aggregator (Jetson Xavier)")
     parser.add_argument("--strategy", type=str, default="flash",
-                        choices=["flash", "flare", "fedavg"])
+                        choices=["flash", "flare", "fedavg", "all"])
     parser.add_argument("--agg-port", type=int, default=8081)
     parser.add_argument("--server-address", type=str, default="localhost:8080")
     parser.add_argument("--rounds", type=int, default=60,
@@ -365,49 +365,56 @@ if __name__ == "__main__":
         print(f"    {k}: {v:.4f}")
     print()
 
-    # Build the persistent inner strategy
-    init_model  = SimpleNet()
-    init_params = ndarrays_to_parameters(get_parameters(init_model))
+    strategies = ["flash", "flare", "fedavg"] if args.strategy == "all" else [args.strategy]
 
-    inner_strategy = _InnerStrategy(
-        bar_tau_r=TARGET_TAU,
-        t_thr=LATENCY_THRESHOLD,
-        compression_options=list(COMPRESSION_OPTIONS),
-        strategy_name=args.strategy,
-        min_fit_clients=NUM_LEAF_CLIENTS,
-        min_evaluate_clients=NUM_LEAF_CLIENTS,
-        min_available_clients=NUM_LEAF_CLIENTS,
-        fit_metrics_aggregation_fn=_agg_metrics,
-        evaluate_metrics_aggregation_fn=_agg_metrics,
-        initial_parameters=init_params,
-    )
+    for strategy_name in strategies:
+        print(f"\n[Aggregator] Starting strategy: {strategy_name}")
 
-    # Start the inner server in a background thread — it runs for all rounds
-    def _run_inner_server():
-        print(f"[Aggregator] Inner server listening on {inner_addr}")
-        fl.server.start_server(
-            server_address=inner_addr,
-            config=fl.server.ServerConfig(num_rounds=args.rounds),
-            strategy=inner_strategy,
+        # Build a fresh inner strategy for this experiment
+        init_model  = SimpleNet()
+        init_params = ndarrays_to_parameters(get_parameters(init_model))
+
+        inner_strategy = _InnerStrategy(
+            bar_tau_r=TARGET_TAU,
+            t_thr=LATENCY_THRESHOLD,
+            compression_options=list(COMPRESSION_OPTIONS),
+            strategy_name=strategy_name,
+            min_fit_clients=NUM_LEAF_CLIENTS,
+            min_evaluate_clients=NUM_LEAF_CLIENTS,
+            min_available_clients=NUM_LEAF_CLIENTS,
+            fit_metrics_aggregation_fn=_agg_metrics,
+            evaluate_metrics_aggregation_fn=_agg_metrics,
+            initial_parameters=init_params,
         )
-        print("[Aggregator] Inner server finished all rounds.")
 
-    inner_thread = threading.Thread(target=_run_inner_server, daemon=True)
-    inner_thread.start()
+        # Start the inner server in a background thread — it runs for all rounds
+        def _run_inner_server(strategy=inner_strategy):
+            print(f"[Aggregator] Inner server listening on {inner_addr}")
+            fl.server.start_server(
+                server_address=inner_addr,
+                config=fl.server.ServerConfig(num_rounds=args.rounds),
+                strategy=strategy,
+            )
+            print("[Aggregator] Inner server finished all rounds.")
 
-    # Wait a moment for the inner server to start accepting connections
-    time.sleep(2.0)
+        inner_thread = threading.Thread(target=_run_inner_server, daemon=True)
+        inner_thread.start()
 
-    print(f"[Aggregator] Leaf clients should connect to: {leaf_addr}")
-    print(f"    python clients.py --cid 0 --agg-address {leaf_addr} --strategy {args.strategy}")
-    print(f"    python clients.py --cid 1 --agg-address {leaf_addr} --strategy {args.strategy}")
-    print()
+        # Wait a moment for the inner server to start accepting connections
+        time.sleep(2.0)
 
-    # Connect upstream to the global server as a Flower client
-    agg_client = AggregatorClient(inner_strategy, NUM_LEAF_CLIENTS)
-    print(f"[Aggregator] Connecting to global server at {args.server_address} ...")
-    fl.client.start_numpy_client(server_address=args.server_address, client=agg_client)
+        print(f"[Aggregator] Leaf clients should connect to: {leaf_addr}")
+        print(f"    python clients.py --cid 0 --agg-address {leaf_addr} --strategy {strategy_name}")
+        print(f"    python clients.py --cid 1 --agg-address {leaf_addr} --strategy {strategy_name}")
+        print()
 
-    # Wait for inner server thread to finish (it should be done by now)
-    inner_thread.join(timeout=10)
-    print("[Aggregator] Done.")
+        # Connect upstream to the global server as a Flower client
+        agg_client = AggregatorClient(inner_strategy, NUM_LEAF_CLIENTS)
+        print(f"[Aggregator] Connecting to global server at {args.server_address} ...")
+        fl.client.start_numpy_client(server_address=args.server_address, client=agg_client)
+
+        # Wait for inner server thread to finish
+        inner_thread.join(timeout=30)
+        print(f"[Aggregator] {strategy_name} complete.")
+
+    print("[Aggregator] All strategies done.")

@@ -545,7 +545,7 @@ if __name__ == "__main__":
     parser.add_argument("--cid", type=str, required=True)
     parser.add_argument("--agg-address", type=str, default="localhost:8081")
     parser.add_argument("--strategy", type=str, default="flash",
-                        choices=list(CLIENT_REGISTRY.keys()))
+                        choices=list(CLIENT_REGISTRY.keys()) + ["all"])
     parser.add_argument("--data-workers", type=int, default=0,
                         help="DataLoader workers. 0 for Pi 5, 1-2 for Jetson Nano.")
     parser.add_argument("--reconnect-delay", type=float, default=5.0,
@@ -553,5 +553,23 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print(f"[Client {args.cid}] Hardware: {hw_metrics.DEVICE}")
-    client = CLIENT_REGISTRY[args.strategy](args.cid, args.data_workers)
-    run_client_loop(client, args.agg_address, args.reconnect_delay)
+
+    if args.strategy == "all":
+        for strategy_name in ["flash", "flare", "fedavg"]:
+            print(f"[Client {args.cid}] Starting strategy: {strategy_name}")
+            client = CLIENT_REGISTRY[strategy_name](args.cid, args.data_workers)
+            # Connect once for this experiment, retry on connection errors but
+            # do not loop forever — move to next strategy once server disconnects us
+            while True:
+                try:
+                    print(f"[Client {args.cid}] Connecting to aggregator at {args.agg_address} ...")
+                    fl.client.start_numpy_client(server_address=args.agg_address, client=client)
+                    print(f"[Client {args.cid}] {strategy_name} complete.")
+                    break
+                except Exception as e:
+                    print(f"[Client {args.cid}] Connection error: {e}. Retrying in {args.reconnect_delay}s ...")
+                    time.sleep(args.reconnect_delay)
+        print(f"[Client {args.cid}] All strategies done.")
+    else:
+        client = CLIENT_REGISTRY[args.strategy](args.cid, args.data_workers)
+        run_client_loop(client, args.agg_address, args.reconnect_delay)

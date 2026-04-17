@@ -371,7 +371,7 @@ if __name__ == "__main__":
     histories: Dict[str, Any] = {}
     hw_csv_map: Dict[str, Path] = {}
 
-    for name in to_run:
+    for i, name in enumerate(to_run):
         label = f"{name.upper()} (HFL)"
         print(f"\n{'='*62}")
         print(f"  Experiment: {label}")
@@ -387,6 +387,9 @@ if __name__ == "__main__":
         )
         if not args.no_wait:
             input("  Press ENTER when aggregator + clients are running ...")
+        elif i > 0:
+            print("  Waiting 20s for aggregator + clients to restart ...")
+            time.sleep(20)
 
         strategy = factories[name]()
         hw_logger = RoundHWLogger(strategy, output_dir, name)
