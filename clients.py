@@ -95,6 +95,50 @@ def model_size_bytes(net) -> float:
     return float(sum(p.nbytes for p in get_parameters(net)))
 
 
+def compress_topk(params: List[np.ndarray], r: float) -> List[np.ndarray]:
+    """Top-k sparsify each layer and pack into a flat float32 array for transmission.
+
+    Pack format per layer:
+        [ndim, d0, ..., d_{ndim-1}, k, idx_0, ..., idx_{k-1}, val_0, ..., val_{k-1}]
+    All values are float32 so the array can be sent as a standard ndarray over gRPC.
+    """
+    if r >= 1.0:
+        return params
+    packed = []
+    for layer in params:
+        shape = layer.shape
+        flat = layer.flatten().astype(np.float32)
+        n = len(flat)
+        k = max(1, int(n * r))
+        idx = np.argpartition(np.abs(flat), -k)[-k:]
+        idx = np.sort(idx)
+        vals = flat[idx]
+        header = np.array([float(len(shape))] + [float(d) for d in shape] + [float(k)], dtype=np.float32)
+        packed.append(np.concatenate([header, idx.astype(np.float32), vals]))
+    return packed
+
+
+def decompress_topk(packed_params: List[np.ndarray]) -> List[np.ndarray]:
+    """Reconstruct dense arrays from packed sparse representation produced by compress_topk."""
+    result = []
+    for packed in packed_params:
+        ndim = int(packed[0])
+        shape = tuple(int(packed[1 + i]) for i in range(ndim))
+        k = int(packed[1 + ndim])
+        idx = packed[2 + ndim: 2 + ndim + k].astype(np.int32)
+        vals = packed[2 + ndim + k: 2 + ndim + 2 * k]
+        dense = np.zeros(int(np.prod(shape)), dtype=np.float32)
+        dense[idx] = vals
+        result.append(dense.reshape(shape))
+    return result
+
+
+def compressed_size_bytes(packed_params: List[np.ndarray]) -> float:
+    """Total bytes of the packed sparse representation (actual bytes transmitted)."""
+    return float(sum(p.nbytes for p in packed_params))
+
+
+
 # ── Data loader ────────────────────────────────────────────────────────────────
 def load_data(
     cid: int, data_workers: int = 0
@@ -344,20 +388,22 @@ class FLASHClient(BaseLeafClient):
         hw_after = snapshot()
 
         msz = model_size_bytes(self.model)
+        params = compress_topk(get_parameters(self.model), optimal_r)
+        actual_bytes = compressed_size_bytes(params) if optimal_r < 1.0 else msz
         extra = {
             "compression_ratio_applied": float(optimal_r),
             "local_epochs": float(tau),
             "learning_rate": float(eta),
             "bar_tau_r": float(bar_tau_r),
             "server_round": float(server_rnd),
-            "data_transfer_size_bytes": msz * optimal_r,
+            "data_transfer_size_bytes": actual_bytes,
             "model_size_bytes": msz,
             "fit_wall_time_s": float(training_time),
             "comp_capacity_proxy": float(tau / max(training_time, 1e-6)),
         }
         metrics = build_metrics(hw_before, hw_after, per_epoch, training_time, energy_j, extra)
         n = int(sum(e["epoch_samples"] for e in per_epoch)) or BATCH_SIZE
-        return get_parameters(self.model), n, metrics
+        return params, n, metrics
 
 
 # ── FLARE ──────────────────────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
@@ -48,6 +49,7 @@ from hw_metrics import EnergyAccumulator, snapshot, delta
 from clients import (
     SimpleNet, get_parameters, set_parameters, model_size_bytes,
     TARGET_TAU, COMPRESSION_OPTIONS, MAX_LOCAL_EPOCHS,
+    decompress_topk,
 )
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -189,6 +191,17 @@ class _InnerStrategy(FedAvg):
         return min(self.compression_options)
 
     def aggregate_fit(self, server_round, results, failures):
+        # Decompress sparse parameters sent by FLASH clients before FedAvg averages them
+        if self.strategy_name == "flash":
+            decompressed = []
+            for client, fit_res in results:
+                r = fit_res.metrics.get("compression_ratio_applied", 1.0)
+                if r < 1.0:
+                    params = decompress_topk(parameters_to_ndarrays(fit_res.parameters))
+                    fit_res = dataclasses.replace(fit_res, parameters=ndarrays_to_parameters(params))
+                decompressed.append((client, fit_res))
+            results = decompressed
+
         # Calibrate cost model
         if self.strategy_name == "flash":
             kc_new, kx_new = [], []
