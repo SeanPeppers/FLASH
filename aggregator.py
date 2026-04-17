@@ -191,14 +191,17 @@ class _InnerStrategy(FedAvg):
         return min(self.compression_options)
 
     def aggregate_fit(self, server_round, results, failures):
-        # Decompress sparse parameters sent by FLASH clients before FedAvg averages them
+        # Decompress delta and reconstruct full params before FedAvg averages them.
+        # FLASH clients send compressed(trained_params - base_params); we add base back here.
         if self.strategy_name == "flash":
+            base = parameters_to_ndarrays(self._current_params) if self._current_params else None
             decompressed = []
             for client, fit_res in results:
                 r = fit_res.metrics.get("compression_ratio_applied", 1.0)
-                if r < 1.0:
-                    params = decompress_topk(parameters_to_ndarrays(fit_res.parameters))
-                    fit_res = dataclasses.replace(fit_res, parameters=ndarrays_to_parameters(params))
+                if r < 1.0 and base is not None:
+                    delta = decompress_topk(parameters_to_ndarrays(fit_res.parameters))
+                    full = [b.astype(np.float32) + d for b, d in zip(base, delta)]
+                    fit_res = dataclasses.replace(fit_res, parameters=ndarrays_to_parameters(full))
                 decompressed.append((client, fit_res))
             results = decompressed
 

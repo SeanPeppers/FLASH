@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import argparse
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -96,11 +96,15 @@ def model_size_bytes(net) -> float:
 
 
 def compress_topk(params: List[np.ndarray], r: float) -> List[np.ndarray]:
-    """Top-k sparsify each layer and pack into a flat float32 array for transmission.
+    """Top-k sparsify each layer and pack for transmission.
 
-    Pack format per layer:
-        [ndim, d0, ..., d_{ndim-1}, k, idx_0, ..., idx_{k-1}, val_0, ..., val_{k-1}]
-    All values are float32 so the array can be sent as a standard ndarray over gRPC.
+    Returns a flat list of array pairs per layer:
+        [meta_0, vals_0, meta_1, vals_1, ...]
+    where:
+        meta_i  (float32): [ndim, d0, ..., d_{ndim-1}, k, idx_0, ..., idx_{k-1}]
+        vals_i  (float16): [val_0, ..., val_{k-1}]
+
+    Storing values as float16 halves transmission bytes for the value payload.
     """
     if r >= 1.0:
         return params
@@ -113,20 +117,27 @@ def compress_topk(params: List[np.ndarray], r: float) -> List[np.ndarray]:
         idx = np.argpartition(np.abs(flat), -k)[-k:]
         idx = np.sort(idx)
         vals = flat[idx]
-        header = np.array([float(len(shape))] + [float(d) for d in shape] + [float(k)], dtype=np.float32)
-        packed.append(np.concatenate([header, idx.astype(np.float32), vals]))
+        meta = np.array(
+            [float(len(shape))] + [float(d) for d in shape] + [float(k)],
+            dtype=np.float32,
+        )
+        meta = np.concatenate([meta, idx.astype(np.float32)])
+        packed.append(meta)
+        packed.append(vals.astype(np.float16))
     return packed
 
 
 def decompress_topk(packed_params: List[np.ndarray]) -> List[np.ndarray]:
-    """Reconstruct dense arrays from packed sparse representation produced by compress_topk."""
+    """Reconstruct dense float32 arrays from packed pairs produced by compress_topk."""
     result = []
-    for packed in packed_params:
-        ndim = int(packed[0])
-        shape = tuple(int(packed[1 + i]) for i in range(ndim))
-        k = int(packed[1 + ndim])
-        idx = packed[2 + ndim: 2 + ndim + k].astype(np.int32)
-        vals = packed[2 + ndim + k: 2 + ndim + 2 * k]
+    it = iter(packed_params)
+    for meta in it:
+        vals_fp16 = next(it)
+        ndim = int(meta[0])
+        shape = tuple(int(meta[1 + i]) for i in range(ndim))
+        k = int(meta[1 + ndim])
+        idx = meta[2 + ndim: 2 + ndim + k].astype(np.int32)
+        vals = vals_fp16.astype(np.float32)
         dense = np.zeros(int(np.prod(shape)), dtype=np.float32)
         dense[idx] = vals
         result.append(dense.reshape(shape))
@@ -194,8 +205,10 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: optim.Optimizer,
     device: torch.device,
+    scaler: Optional[torch.cuda.amp.GradScaler] = None,
 ) -> Dict[str, float]:
     model.train()
+    use_amp = scaler is not None
     total_loss, correct, total = 0.0, 0, 0
     batch_times: List[float] = []
     grad_norms: List[float] = []
@@ -204,16 +217,24 @@ def train_one_epoch(
         t0 = time.perf_counter()
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        logits = model(x)
-        loss = criterion(logits, y)
-        loss.backward()
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            logits = model(x)
+            loss = criterion(logits, y)
+        if use_amp:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
         g_norm = sum(
             p.grad.data.norm(2).item() ** 2
             for p in model.parameters() if p.grad is not None
         ) ** 0.5
         grad_norms.append(g_norm)
-        optimizer.step()
+        if use_amp:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
 
         batch_times.append(time.perf_counter() - t0)
         total_loss += loss.item() * x.size(0)
@@ -339,6 +360,10 @@ class BaseLeafClient(fl.client.NumPyClient):
         self.criterion = nn.CrossEntropyLoss()
         self.base_lr = 0.01
         self.train_loader, self.test_loader = load_data(self.cid_int, data_workers)
+        # GradScaler for FP16 mixed-precision training on CUDA devices (no-op on CPU)
+        self.scaler: Optional[torch.cuda.amp.GradScaler] = (
+            torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+        )
         print(
             f"[Client {client_id}] hw={hw_metrics.DEVICE}  "
             f"torch={self.device}  train_n={len(self.train_loader.dataset)}"
@@ -363,7 +388,13 @@ class BaseLeafClient(fl.client.NumPyClient):
 
 # ── FLASH ──────────────────────────────────────────────────────────────────────
 class FLASHClient(BaseLeafClient):
+    def __init__(self, client_id: str, data_workers: int = 0):
+        super().__init__(client_id, data_workers)
+        self._base_params: Optional[List[np.ndarray]] = None
+
     def fit(self, parameters, config: Dict) -> Tuple:
+        # Store the params received from the server so we can compute a delta
+        self._base_params = [p.copy().astype(np.float32) for p in parameters]
         set_parameters(self.model, parameters)
         bar_tau_r  = float(config.get("bar_tau_r", TARGET_TAU))
         optimal_r  = float(config.get("optimal_r_star", 1.0))
@@ -379,7 +410,7 @@ class FLASHClient(BaseLeafClient):
         t0 = time.perf_counter()
 
         per_epoch = [
-            train_one_epoch(self.model, self.train_loader, self.criterion, optimizer, self.device)
+            train_one_epoch(self.model, self.train_loader, self.criterion, optimizer, self.device, self.scaler)
             for _ in range(tau)
         ]
 
@@ -388,7 +419,10 @@ class FLASHClient(BaseLeafClient):
         hw_after = snapshot()
 
         msz = model_size_bytes(self.model)
-        params = compress_topk(get_parameters(self.model), optimal_r)
+        # Compute delta and compress it — deltas are much sparser than raw weights
+        trained = [p.astype(np.float32) for p in get_parameters(self.model)]
+        delta_params = [t - b for t, b in zip(trained, self._base_params)]
+        params = compress_topk(delta_params, optimal_r)
         actual_bytes = compressed_size_bytes(params) if optimal_r < 1.0 else msz
         extra = {
             "compression_ratio_applied": float(optimal_r),
@@ -422,7 +456,7 @@ class FLAREClient(BaseLeafClient):
         t0 = time.perf_counter()
 
         per_epoch = [
-            train_one_epoch(self.model, self.train_loader, self.criterion, optimizer, self.device)
+            train_one_epoch(self.model, self.train_loader, self.criterion, optimizer, self.device, self.scaler)
             for _ in range(tau)
         ]
 
@@ -458,7 +492,7 @@ class FedAvgClient(BaseLeafClient):
         t0 = time.perf_counter()
 
         per_epoch = [
-            train_one_epoch(self.model, self.train_loader, self.criterion, optimizer, self.device)
+            train_one_epoch(self.model, self.train_loader, self.criterion, optimizer, self.device, self.scaler)
             for _ in range(FEDAVG_LOCAL_EPOCHS)
         ]
 
