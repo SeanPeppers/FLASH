@@ -166,9 +166,9 @@ def load_data(
         ])
         train_full = datasets.MNIST(DATA_DIR, train=True, download=False, transform=transform)
         test_full  = datasets.MNIST(DATA_DIR, train=False, download=False, transform=transform)
-    except Exception:
+    except Exception as e:
         print(
-            f"[Client {cid}] ERROR: MNIST not found in {DATA_DIR}.\n"
+            f"[Client {cid}] ERROR loading MNIST from {DATA_DIR}: {e}\n"
             f"  Run this first:\n"
             f"  python -c \"from torchvision.datasets import MNIST; "
             f"MNIST('{DATA_DIR}', download=True)\"\n"
