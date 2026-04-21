@@ -34,7 +34,7 @@ Usage:
 
 import argparse
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -153,7 +153,7 @@ def compressed_size_bytes(packed_params: List[np.ndarray]) -> float:
 # ── Data loader ────────────────────────────────────────────────────────────────
 def load_data(
     cid: int, data_workers: int = 0
-) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+) -> Tuple[Any, Any]:
     """
     Load pre-downloaded MNIST. Raises a clear error if data is missing
     rather than silently trying to download mid-experiment.
@@ -201,7 +201,7 @@ def load_data(
 # ── Per-epoch training ─────────────────────────────────────────────────────────
 def train_one_epoch(
     model: nn.Module,
-    loader: torch.utils.data.DataLoader,
+    loader: Any,
     criterion: nn.Module,
     optimizer: optim.Optimizer,
     device: torch.device,
@@ -256,7 +256,7 @@ def train_one_epoch(
 @torch.no_grad()
 def evaluate_model(
     model: nn.Module,
-    loader: torch.utils.data.DataLoader,
+    loader: Any,
     criterion: nn.Module,
     device: torch.device,
 ) -> Tuple[float, float]:
