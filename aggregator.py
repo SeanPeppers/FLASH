@@ -28,7 +28,6 @@ Usage:
                          --server-address <CHAMELEON_IP>:8080 --rounds 60
 """
 
-from __future__ import annotations
 
 import argparse
 import dataclasses

@@ -19,7 +19,6 @@ Start order:
     4. python clients.py --cid 1 --agg-address <XAVIER_IP>:8081 --strategy flash
 """
 
-from __future__ import annotations
 
 import argparse
 import csv
