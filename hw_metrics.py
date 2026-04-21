@@ -17,6 +17,8 @@ Install (all devices):
     pip install pynvml --break-system-packages   # Jetson / Chameleon GPU nodes
 """
 
+from __future__ import annotations
+
 import os
 import re
 import subprocess

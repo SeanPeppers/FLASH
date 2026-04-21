@@ -20,6 +20,8 @@ Start order:
 """
 
 
+from __future__ import annotations
+
 import argparse
 import csv
 import os
@@ -31,11 +33,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import flwr as fl
-from flwr.common import FitIns, Scalar
-try:
-    from flwr.common import ndarrays_to_parameters
-except ImportError:
-    from flwr.common import weights_to_parameters as ndarrays_to_parameters
+from flwr.common import FitIns, Scalar, ndarrays_to_parameters
 from flwr.server.strategy import FedAvg
 
 import hw_metrics
@@ -352,18 +350,14 @@ if __name__ == "__main__":
     print()
 
     init_params = ndarrays_to_parameters(get_parameters(SimpleNet()))
-    import inspect
-    _fedavg_params = inspect.signature(FedAvg.__init__).parameters
-    common = dict(min_fit_clients=NUM_AGGREGATORS,
-                  min_available_clients=NUM_AGGREGATORS)
-    if "min_evaluate_clients" in _fedavg_params:
-        common["min_evaluate_clients"] = NUM_AGGREGATORS
-    if "fit_metrics_aggregation_fn" in _fedavg_params:
-        common["fit_metrics_aggregation_fn"] = _global_agg
-    if "evaluate_metrics_aggregation_fn" in _fedavg_params:
-        common["evaluate_metrics_aggregation_fn"] = _global_agg
-    if "initial_parameters" in _fedavg_params:
-        common["initial_parameters"] = init_params
+    common = dict(
+        min_fit_clients=NUM_AGGREGATORS,
+        min_evaluate_clients=NUM_AGGREGATORS,
+        min_available_clients=NUM_AGGREGATORS,
+        fit_metrics_aggregation_fn=_global_agg,
+        evaluate_metrics_aggregation_fn=_global_agg,
+        initial_parameters=init_params,
+    )
 
     factories = {
         "flash":  lambda: FLASHGlobalStrategy(
