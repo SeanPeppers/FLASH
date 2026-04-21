@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 server.py — Global coordinator on Chameleon Cloud
 

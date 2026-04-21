@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 clients.py — Leaf clients for Raspberry Pi 5 and Jetson Nano
 
