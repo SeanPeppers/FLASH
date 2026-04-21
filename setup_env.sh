@@ -15,4 +15,4 @@ source flash/bin/activate
 
 # 4. Upgrade pip and install dependencies
 pip install --upgrade pip
-pip install flwr torch torchvision psutil pynvml pandas matplotlib
+pip install "flwr>=1.0,<2.0" torch torchvision psutil pynvml pandas matplotlib
