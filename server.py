@@ -354,23 +354,16 @@ if __name__ == "__main__":
     init_params = ndarrays_to_parameters(get_parameters(SimpleNet()))
     import inspect
     _fedavg_params = inspect.signature(FedAvg.__init__).parameters
+    common = dict(min_fit_clients=NUM_AGGREGATORS,
+                  min_available_clients=NUM_AGGREGATORS)
     if "min_evaluate_clients" in _fedavg_params:
-        common = dict(
-            min_fit_clients=NUM_AGGREGATORS,
-            min_evaluate_clients=NUM_AGGREGATORS,
-            min_available_clients=NUM_AGGREGATORS,
-            fit_metrics_aggregation_fn=_global_agg,
-            evaluate_metrics_aggregation_fn=_global_agg,
-            initial_parameters=init_params,
-        )
-    else:
-        common = dict(
-            min_fit_clients=NUM_AGGREGATORS,
-            min_available_clients=NUM_AGGREGATORS,
-            fit_metrics_aggregation_fn=_global_agg,
-            evaluate_metrics_aggregation_fn=_global_agg,
-            initial_parameters=init_params,
-        )
+        common["min_evaluate_clients"] = NUM_AGGREGATORS
+    if "fit_metrics_aggregation_fn" in _fedavg_params:
+        common["fit_metrics_aggregation_fn"] = _global_agg
+    if "evaluate_metrics_aggregation_fn" in _fedavg_params:
+        common["evaluate_metrics_aggregation_fn"] = _global_agg
+    if "initial_parameters" in _fedavg_params:
+        common["initial_parameters"] = init_params
 
     factories = {
         "flash":  lambda: FLASHGlobalStrategy(
