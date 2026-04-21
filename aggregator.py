@@ -38,10 +38,12 @@ from typing import Dict, List, Optional, Set, Tuple
 import numpy as np
 import torch
 import flwr as fl
-from flwr.common import (
-    FitIns, Parameters,
-    ndarrays_to_parameters, parameters_to_ndarrays,
-)
+from flwr.common import FitIns, Parameters
+try:
+    from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
+except ImportError:
+    from flwr.common import weights_to_parameters as ndarrays_to_parameters
+    from flwr.common import parameters_to_weights as parameters_to_ndarrays
 from flwr.server.strategy import FedAvg
 
 import hw_metrics

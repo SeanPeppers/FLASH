@@ -31,7 +31,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import flwr as fl
-from flwr.common import FitIns, Scalar, ndarrays_to_parameters
+from flwr.common import FitIns, Scalar
+try:
+    from flwr.common import ndarrays_to_parameters
+except ImportError:
+    from flwr.common import weights_to_parameters as ndarrays_to_parameters
 from flwr.server.strategy import FedAvg
 
 import hw_metrics
