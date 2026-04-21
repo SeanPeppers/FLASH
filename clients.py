@@ -40,6 +40,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+_AMP_AVAILABLE = hasattr(torch.cuda, "amp")
+
+try:
+    from contextlib import nullcontext as _nullcontext
+except ImportError:
+    from contextlib import contextmanager
+    @contextmanager
+    def _nullcontext():
+        yield
 import flwr as fl
 from collections import OrderedDict
 
@@ -205,7 +215,7 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: optim.Optimizer,
     device: torch.device,
-    scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    scaler: Optional[Any] = None,
 ) -> Dict[str, float]:
     model.train()
     use_amp = scaler is not None
@@ -217,7 +227,7 @@ def train_one_epoch(
         t0 = time.perf_counter()
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with (torch.cuda.amp.autocast(enabled=use_amp) if _AMP_AVAILABLE else _nullcontext()):
             logits = model(x)
             loss = criterion(logits, y)
         if use_amp:
@@ -361,8 +371,8 @@ class BaseLeafClient(fl.client.NumPyClient):
         self.base_lr = 0.01
         self.train_loader, self.test_loader = load_data(self.cid_int, data_workers)
         # GradScaler for FP16 mixed-precision training on CUDA devices (no-op on CPU)
-        self.scaler: Optional[torch.cuda.amp.GradScaler] = (
-            torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+        self.scaler: Optional[Any] = (
+            torch.cuda.amp.GradScaler() if (_AMP_AVAILABLE and torch.cuda.is_available()) else None
         )
         print(
             f"[Client {client_id}] hw={hw_metrics.DEVICE}  "
