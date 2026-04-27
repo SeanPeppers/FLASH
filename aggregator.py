@@ -112,20 +112,27 @@ class _InnerStrategy(FedAvg):
     """
 
     def __init__(self, bar_tau_r: float, t_thr: float,
-                 compression_options: List[float], strategy_name: str, **kwargs):
+                 compression_options: List[float], strategy_name: str,
+                 fixed_r: Optional[float] = None,
+                 ema_alpha: float = 0.3,
+                 **kwargs):
         super().__init__(**kwargs)
         self.bar_tau_r = bar_tau_r
         self.t_thr = t_thr
         self.compression_options = sorted(compression_options, reverse=True)
         self.strategy_name = strategy_name
+        # Task 6: when set, all clients receive this ratio (ablation study mode)
+        self.fixed_r = fixed_r
         self._leaf_history: Dict[str, Dict] = {}
 
-        # Cost model calibration (FLASH only)
-        self.k_comp = 0.1
-        self.k_comm = 0.5
-        self._kc_hist: List[float] = [0.1]
-        self._kx_hist: List[float] = [0.5]
-        self._window = 3
+        # Task 8: EMA-based cost model (replaces rolling window averages)
+        self.k_comp: float = 0.1
+        self.k_comm: float = 0.5
+        self.ema_alpha: float = ema_alpha   # smoothing factor ∈ (0, 1]
+
+        # Task 7: per-client latency history for jitter detection
+        self._latency_history: Dict[str, List[float]] = {}
+        self._jitter_window: int = 5
 
         # Thread-safe handshake between inner server and aggregator client
         self._round_ready   = threading.Event()   # aggregator signals: new params ready
@@ -175,20 +182,37 @@ class _InnerStrategy(FedAvg):
         return out
 
     def _pick_r(self, cid: str) -> float:
+        # Task 6: ablation mode — bypass all adaptive logic
+        if self.fixed_r is not None:
+            return self.fixed_r
+
         if cid not in self._leaf_history:
             return 1.0
         m = self._leaf_history[cid]
         fit_time = m.get("fit_wall_time_s", 0.0)
-        if fit_time > self.t_thr:
+
+        # Task 7: compute jitter-adjusted latency threshold.
+        # When recent fit times are highly variable, reduce the effective threshold
+        # so we compress more aggressively to stabilise round-trip times.
+        hist = self._latency_history.get(cid, [])
+        if len(hist) >= 3:
+            jitter = float(np.std(hist[-self._jitter_window:]))
+            jitter_norm = min(jitter / max(self.t_thr, 1e-6), 1.0)
+            effective_thr = self.t_thr * (1.0 - 0.5 * jitter_norm)
+        else:
+            effective_thr = self.t_thr
+
+        if fit_time > effective_thr:
             candidates = [r for r in self.compression_options if r < 1.0]
             return candidates[0] if candidates else 0.25
-        # Analytic fallback
+
+        # Analytic cost-model fallback
         f = m.get("comp_capacity_proxy", 2.0)
         r_prev = m.get("compression_ratio_applied", 1.0)
         S = m.get("data_transfer_size_bytes", 1e5) / r_prev if r_prev > 0 else 1e5
         T_comp = self.k_comp * self.bar_tau_r / max(f, 1e-6)
         for r in self.compression_options:
-            if T_comp + self.k_comm * r * S <= self.t_thr:
+            if T_comp + self.k_comm * r * S <= effective_thr:
                 return r
         return min(self.compression_options)
 
@@ -207,9 +231,16 @@ class _InnerStrategy(FedAvg):
                 decompressed.append((client, fit_res))
             results = decompressed
 
-        # Calibrate cost model
+        # Task 7: update per-client latency history for jitter detection
+        for client, fit_res in results:
+            fit_time = fit_res.metrics.get("fit_wall_time_s", 0.0)
+            hist = self._latency_history.setdefault(client.cid, [])
+            hist.append(fit_time)
+            if len(hist) > self._jitter_window * 2:
+                self._latency_history[client.cid] = hist[-self._jitter_window:]
+
+        # Task 8: EMA cost model calibration with outlier rejection (FLASH only)
         if self.strategy_name == "flash":
-            kc_new, kx_new = [], []
             for client, fit_res in results:
                 self._leaf_history[client.cid] = fit_res.metrics
                 m = fit_res.metrics
@@ -217,18 +248,20 @@ class _InnerStrategy(FedAvg):
                 f   = m.get("comp_capacity_proxy", 1.0)
                 r   = m.get("compression_ratio_applied", 1.0)
                 S   = m.get("data_transfer_size_bytes", 1e5) / r if r > 0 else 1e5
-                T_c = m.get("fit_wall_time_s", 0.0) * 0.7
-                T_x = m.get("fit_wall_time_s", 0.0) * 0.3
+                T_total = m.get("fit_wall_time_s", 0.0)
+                T_c = T_total * 0.7
+                T_x = T_total * 0.3
+
                 if T_c > 0 and tau > 0 and f > 0:
-                    kc_new.append(T_c / (tau / f))
+                    kc_obs = T_c / (tau / max(f, 1e-6))
+                    # Reject outliers > 5× current estimate to avoid instability
+                    if kc_obs < 5.0 * self.k_comp or self.k_comp < 1e-6:
+                        self.k_comp = (1 - self.ema_alpha) * self.k_comp + self.ema_alpha * kc_obs
+
                 if T_x > 0 and S > 0:
-                    kx_new.append(T_x / S)
-            if kc_new:
-                self._kc_hist.append(float(np.mean(kc_new)))
-                self.k_comp = float(np.mean(self._kc_hist[-self._window:]))
-            if kx_new:
-                self._kx_hist.append(float(np.mean(kx_new)))
-                self.k_comm = float(np.mean(self._kx_hist[-self._window:]))
+                    kx_obs = T_x / S
+                    if kx_obs < 5.0 * self.k_comm or self.k_comm < 1e-6:
+                        self.k_comm = (1 - self.ema_alpha) * self.k_comm + self.ema_alpha * kx_obs
         else:
             for client, fit_res in results:
                 self._leaf_history[client.cid] = fit_res.metrics
@@ -236,7 +269,17 @@ class _InnerStrategy(FedAvg):
         agg_result = super().aggregate_fit(server_round, results, failures)
         if agg_result:
             self._result_params = agg_result[0]
-            self._result_metrics = agg_result[1] or {}
+            meta = dict(agg_result[1] or {})
+            # Expose cost model state and jitter so they land in flash_HFL_fit_metrics.csv
+            meta["cost_model_k_comp"] = float(self.k_comp)
+            meta["cost_model_k_comm"] = float(self.k_comm)
+            # Average jitter across clients this round
+            jitters = []
+            for cid, hist in self._latency_history.items():
+                if len(hist) >= 3:
+                    jitters.append(float(np.std(hist[-self._jitter_window:])))
+            meta["latency_jitter_mean_s"] = float(np.mean(jitters)) if jitters else 0.0
+            self._result_metrics = meta
         self._round_done.set()
         return agg_result
 
@@ -357,6 +400,9 @@ if __name__ == "__main__":
     parser.add_argument("--server-address", type=str, default="localhost:8080")
     parser.add_argument("--rounds", type=int, default=60,
                         help="Must match --rounds on server.py")
+    parser.add_argument("--fixed-r", type=float, default=None,
+                        help="Force a fixed compression ratio for ablation study "
+                             "(e.g. 0.25, 0.5, 0.75, 1.0). Bypasses adaptive logic.")
     args = parser.parse_args()
 
     inner_addr = f"0.0.0.0:{args.agg_port}"
@@ -381,6 +427,7 @@ if __name__ == "__main__":
             t_thr=LATENCY_THRESHOLD,
             compression_options=list(COMPRESSION_OPTIONS),
             strategy_name=strategy_name,
+            fixed_r=args.fixed_r,
             min_fit_clients=NUM_LEAF_CLIENTS,
             min_evaluate_clients=NUM_LEAF_CLIENTS,
             min_available_clients=NUM_LEAF_CLIENTS,

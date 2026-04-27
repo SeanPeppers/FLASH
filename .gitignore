@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Data & experiment outputs (large CSVs, checkpoints)
+fl_results_hfl/
+*.csv
+*.pt
+*.pth
+checkpoints/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Claude Code local config
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

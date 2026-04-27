@@ -416,11 +416,18 @@ class EnergyAccumulator:
     def _loop(self):
         while self._running:
             m = snapshot()
-            power_mw = (
-                m.get("power_total_soc_mw")
-                or m.get("gpu_power_nvml_mw")
-                or (m.get("ipmi_system_power_w", 0.0) * 1000.0)
-            )
+            # Use explicit None checks so a legitimate 0.0 reading doesn't
+            # fall through to the next source in the priority chain.
+            if m.get("power_total_soc_mw") is not None:
+                power_mw = m["power_total_soc_mw"]
+            elif m.get("gpu_power_nvml_mw") is not None:
+                power_mw = m["gpu_power_nvml_mw"]
+            elif "ipmi_system_power_w" in m:
+                power_mw = m["ipmi_system_power_w"] * 1000.0
+            else:
+                # Chameleon/generic: GPU power is stored as gpu{idx}_{name}_power_mw
+                gpu_powers = [v for k, v in m.items() if k.endswith("_power_mw") and v > 0]
+                power_mw = sum(gpu_powers) if gpu_powers else 0.0
             with self._lock:
                 self._energy_mj += float(power_mw) * self.interval
             time.sleep(self.interval)

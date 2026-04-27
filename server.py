@@ -33,7 +33,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import flwr as fl
-from flwr.common import FitIns, Scalar, ndarrays_to_parameters
+from flwr.common import FitIns, Parameters, Scalar, ndarrays_to_parameters
 from flwr.server.strategy import FedAvg
 
 import hw_metrics
@@ -145,12 +145,28 @@ class RoundHWLogger:
 # ── FLASH global strategy ──────────────────────────────────────────────────────
 class FLASHGlobalStrategy(FedAvg):
     def __init__(self, bar_tau_r: float, t_thr: float,
-                 compression_options: Set[float], **kwargs):
+                 compression_options: Set[float],
+                 num_rounds: int = NUM_ROUNDS,
+                 patience: int = 10, min_delta: float = 1e-4,
+                 fixed_r: Optional[float] = None,
+                 **kwargs):
         super().__init__(**kwargs)
         self.bar_tau_r = bar_tau_r
         self.t_thr = t_thr
         self.compression_options = sorted(compression_options, reverse=True)
+        self._num_rounds = num_rounds
+        self._fixed_r: Optional[float] = fixed_r
         self._agg_history: Dict[str, Dict] = {}
+
+        # Early stopping state
+        self._patience = patience
+        self._min_delta = min_delta
+        self._best_loss: float = float("inf")
+        self._patience_counter: int = 0
+        self._best_round: int = 0
+        self._best_params: Optional[Parameters] = None
+        self._current_params: Optional[Parameters] = None
+        self._early_stopped: bool = False
 
     def configure_fit(self, server_round, parameters, client_manager):
         aggs = client_manager.sample(
@@ -161,15 +177,19 @@ class FLASHGlobalStrategy(FedAvg):
         for agg in aggs:
             last = self._agg_history.get(agg.cid, {})
             lat = last.get("simulated_latency_seconds", 0.0)
-            r_hint = 1.0
-            if lat > self.t_thr:
+            if self._fixed_r is not None:
+                r_hint = self._fixed_r
+            elif lat > self.t_thr:
                 candidates = [r for r in self.compression_options if r < 1.0]
                 r_hint = candidates[0] if candidates else 0.25
+            else:
+                r_hint = 1.0
             cfg = {
                 "server_round": server_round,
                 "bar_tau_r": self.bar_tau_r,
                 "optimal_r_star": r_hint,
                 "t_thr": self.t_thr,
+                "num_rounds": self._num_rounds,
             }
             out.append((agg, FitIns(parameters, cfg)))
         return out
@@ -177,7 +197,36 @@ class FLASHGlobalStrategy(FedAvg):
     def aggregate_fit(self, server_round, results, failures):
         for agg, fit_res in results:
             self._agg_history[agg.cid] = fit_res.metrics
-        return super().aggregate_fit(server_round, results, failures)
+        aggregated = super().aggregate_fit(server_round, results, failures)
+        # Snapshot the latest aggregated params so aggregate_evaluate can save
+        # them as the best checkpoint if this round's eval loss is an improvement.
+        if aggregated and aggregated[0] is not None:
+            self._current_params = aggregated[0]
+        # After early stopping, freeze the model at the best checkpoint to
+        # prevent further degradation while the remaining rounds still run.
+        if self._early_stopped and self._best_params is not None:
+            return (self._best_params, aggregated[1] if aggregated else {})
+        return aggregated
+
+    def aggregate_evaluate(self, server_round, results, failures):
+        agg = super().aggregate_evaluate(server_round, results, failures)
+        if agg and agg[0] is not None:
+            loss = float(agg[0])
+            if loss < self._best_loss - self._min_delta:
+                self._best_loss = loss
+                self._patience_counter = 0
+                self._best_round = server_round
+                self._best_params = self._current_params
+            else:
+                self._patience_counter += 1
+                if self._patience_counter >= self._patience and not self._early_stopped:
+                    self._early_stopped = True
+                    print(
+                        f"[EarlyStopping] Patience {self._patience} exceeded at "
+                        f"round {server_round}. Best loss {self._best_loss:.4f} at "
+                        f"round {self._best_round}. Freezing model at best checkpoint."
+                    )
+        return agg
 
 
 # ── FLARE global strategy ──────────────────────────────────────────────────────
@@ -337,6 +386,9 @@ if __name__ == "__main__":
                         choices=["flash", "flare", "fedavg", "all"])
     parser.add_argument("--no-wait",     action="store_true",
                         help="Don't prompt between experiments (use when scripting)")
+    parser.add_argument("--fixed-r",     type=float, default=None,
+                        help="Force a fixed compression ratio hint for ablation study "
+                             "(e.g. 0.25, 0.5, 0.75, 1.0). Passed to aggregators via config.")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -364,6 +416,8 @@ if __name__ == "__main__":
                       bar_tau_r=TARGET_TAU,
                       t_thr=LATENCY_THRESHOLD,
                       compression_options=COMPRESSION_OPTIONS,
+                      num_rounds=args.rounds,
+                      fixed_r=args.fixed_r,
                       **common),
         "flare":  lambda: FLAREGlobalStrategy(**common),
         "fedavg": lambda: FedAvg(**common),

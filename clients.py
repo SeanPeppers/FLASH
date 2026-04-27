@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple
@@ -228,6 +229,11 @@ def train_one_epoch(
         else:
             loss.backward()
 
+        # Unscale before clipping so the clip threshold is in real gradient units
+        if use_amp:
+            scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+
         g_norm = sum(
             p.grad.data.norm(2).item() ** 2
             for p in model.parameters() if p.grad is not None
@@ -350,6 +356,12 @@ def build_metrics(
                 break
             del m[k]
 
+    # Replace any inf/nan (e.g. from gradient explosion) with 0.0 so they
+    # don't corrupt downstream CSV aggregation or gRPC serialization.
+    for k in list(m.keys()):
+        if not math.isfinite(m[k]):
+            m[k] = 0.0
+
     return m
 
 
@@ -402,9 +414,12 @@ class FLASHClient(BaseLeafClient):
         bar_tau_r  = float(config.get("bar_tau_r", TARGET_TAU))
         optimal_r  = float(config.get("optimal_r_star", 1.0))
         server_rnd = int(config.get("server_round", 1))
+        num_rounds = int(config.get("num_rounds", 60))
         # Clamp epochs to MAX_LOCAL_EPOCHS so Pi 5 doesn't run for hours
         tau = min(int(config.get("suggested_tau", 2)), MAX_LOCAL_EPOCHS)
-        eta = self.base_lr * (bar_tau_r / max(tau, 1))
+        # Cosine annealing decay: lr scales from ~base down to ~10% of base
+        decay = max(0.5 * (1.0 + math.cos(math.pi * server_rnd / num_rounds)), 0.1)
+        eta = self.base_lr * (bar_tau_r / max(tau, 1)) * decay
         optimizer = optim.Adam(self.model.parameters(), lr=eta)
 
         hw_before = snapshot()
