@@ -96,22 +96,24 @@ def _wait_port(host: str, port: int, timeout: float = 90.0) -> bool:
 
 # ── SSH helper ─────────────────────────────────────────────────────────────────
 
-def _ssh_launch(user: str, host: str, remote_cmd: str, log_path: Path) -> subprocess.Popen:
+def _ssh_launch(user: str, host: str, remote_cmd: str, log_path: Path,
+                pem_key: Optional[str] = None) -> subprocess.Popen:
     """Launch a command on a remote machine via SSH, log output locally."""
-    cmd = ["ssh", "-o", "StrictHostKeyChecking=no", f"{user}@{host}", remote_cmd]
+    key_args = ["-i", pem_key] if pem_key else []
+    cmd = ["ssh", "-o", "StrictHostKeyChecking=no"] + key_args + [f"{user}@{host}", remote_cmd]
     print(f"  [ssh {host}] {remote_cmd}")
     print(f"               → {log_path}")
     return subprocess.Popen(cmd, stdout=_open_log(log_path), stderr=subprocess.STDOUT)
 
 
-def _agg_remote_cmd(strategy: str, rounds: int, agg_port: int, server_ip: str) -> str:
+def _agg_remote_cmd(strategy: str, rounds: int, agg_port: int, server_private_ip: str) -> str:
     return (
         f"cd ~/FLASH && python aggregator.py"
         f" --strategy {strategy}"
         f" --rounds {rounds}"
         f" --leaf-clients {NUM_LEAF_CLIENTS}"
         f" --agg-port {agg_port}"
-        f" --server-address {server_ip}:{SERVER_PORT}"
+        f" --server-address {server_private_ip}:{SERVER_PORT}"
     )
 
 
@@ -199,8 +201,8 @@ def run_fl_local(rounds: int, output_dir: str, log_dir: Path):
 
 def run_fl_distributed(
     rounds: int, output_dir: str, log_dir: Path,
-    server_ip: str, xavier_ips: List[str],
-    ssh_user: str, no_ssh: bool,
+    server_private_ip: str, xavier_ips: List[str],
+    ssh_user: str, pem_key: Optional[str], no_ssh: bool,
 ):
     if len(xavier_ips) != NUM_AGGREGATORS:
         raise ValueError(
@@ -209,14 +211,14 @@ def run_fl_distributed(
 
     print("\n" + "=" * 64)
     print("  PHASE 1 — FL experiment  [DISTRIBUTED / real hardware]")
-    print(f"  Server IP:   {server_ip}:{SERVER_PORT}")
+    print(f"  Server private IP:  {server_private_ip}:{SERVER_PORT}  (aggregators connect here)")
     for i, ip in enumerate(xavier_ips):
-        print(f"  Xavier {i}:     {ip}:{AGG_BASE_PORT + i}  (clients {i*NUM_LEAF_CLIENTS}–{(i+1)*NUM_LEAF_CLIENTS-1})")
+        print(f"  Xavier {i}:  {ip}:{AGG_BASE_PORT + i}  (clients {i*NUM_LEAF_CLIENTS}–{(i+1)*NUM_LEAF_CLIENTS-1})")
     print("=" * 64)
 
     procs: List[subprocess.Popen] = []
     try:
-        # Start server locally (this script runs on Chameleon)
+        # Start server locally — this script runs on the Chameleon box
         server_proc = _launch(
             [_py(), "server.py",
              "--rounds", str(rounds),
@@ -229,7 +231,7 @@ def run_fl_distributed(
         )
         procs.append(server_proc)
 
-        print(f"\n  Waiting for server on {server_ip}:{SERVER_PORT} ...")
+        print(f"\n  Waiting for server to open port {SERVER_PORT} ...")
         if not _wait_port("127.0.0.1", SERVER_PORT):
             raise RuntimeError("Server never opened — check logs/server.log")
         print("  Server ready.\n")
@@ -237,7 +239,8 @@ def run_fl_distributed(
         # Aggregators — SSH to each Xavier or print commands
         for agg_id, xavier_ip in enumerate(xavier_ips):
             agg_port = AGG_BASE_PORT + agg_id
-            remote_cmd = _agg_remote_cmd("all", rounds, agg_port, server_ip)
+            # Aggregators connect back to server using its private 172.28.x.x IP
+            remote_cmd = _agg_remote_cmd("all", rounds, agg_port, server_private_ip)
 
             if no_ssh:
                 print(f"  Run on Xavier {agg_id} ({xavier_ip}):")
@@ -246,43 +249,33 @@ def run_fl_distributed(
                 p = _ssh_launch(
                     ssh_user, xavier_ip, remote_cmd,
                     log_dir / f"aggregator_{agg_id}.log",
+                    pem_key=pem_key,
                 )
                 procs.append(p)
 
-        if no_ssh:
-            print("  ── Client commands (run on each Pi 5 / Jetson Nano) ──")
-            for agg_id, xavier_ip in enumerate(xavier_ips):
-                agg_port = AGG_BASE_PORT + agg_id
-                print(f"\n  Clients for aggregator {agg_id} ({xavier_ip}:{agg_port}):")
-                for local_idx in range(NUM_LEAF_CLIENTS):
-                    cid = agg_id * NUM_LEAF_CLIENTS + local_idx
-                    print(
-                        f"    python clients.py --cid {cid} --num-clients {NUM_TOTAL_CLIENTS}"
-                        f" --strategy all --agg-address {xavier_ip}:{agg_port}"
-                    )
-            print(
-                "\n  Start the clients above, then press ENTER here when they're all connected ..."
-            )
-            input()
-        else:
-            # Wait for aggregator ports to open on the Xaviers
-            print(f"\n  Waiting for {NUM_AGGREGATORS} aggregator ports ...")
+        # Always print client commands — clients run on Pi 5s which aren't SSH'd
+        print("  ── Client commands — run on each Pi 5 / Jetson Nano ──")
+        for agg_id, xavier_ip in enumerate(xavier_ips):
+            agg_port = AGG_BASE_PORT + agg_id
+            print(f"\n  Clients for Xavier {agg_id} ({xavier_ip}:{agg_port}):")
+            for local_idx in range(NUM_LEAF_CLIENTS):
+                cid = agg_id * NUM_LEAF_CLIENTS + local_idx
+                print(
+                    f"    python clients.py --cid {cid} --num-clients {NUM_TOTAL_CLIENTS}"
+                    f" --strategy all --agg-address {xavier_ip}:{agg_port}"
+                )
+
+        if not no_ssh:
+            # Wait for aggregator ports before telling user to connect clients
+            print(f"\n  Waiting for {NUM_AGGREGATORS} aggregator ports to open ...")
             for agg_id, xavier_ip in enumerate(xavier_ips):
                 agg_port = AGG_BASE_PORT + agg_id
                 if not _wait_port(xavier_ip, agg_port, timeout=120):
                     raise RuntimeError(f"Aggregator {agg_id} on {xavier_ip}:{agg_port} never opened")
             print("  All aggregators ready.")
-            print("\n  ── Now start clients on each Pi 5 / Jetson Nano ──")
-            for agg_id, xavier_ip in enumerate(xavier_ips):
-                agg_port = AGG_BASE_PORT + agg_id
-                for local_idx in range(NUM_LEAF_CLIENTS):
-                    cid = agg_id * NUM_LEAF_CLIENTS + local_idx
-                    print(
-                        f"    python clients.py --cid {cid} --num-clients {NUM_TOTAL_CLIENTS}"
-                        f" --strategy all --agg-address {xavier_ip}:{agg_port}"
-                    )
-            print("\n  Press ENTER once all clients are connected ...")
-            input()
+
+        print("\n  Start the clients above, then press ENTER here to continue ...")
+        input()
 
         print(f"\n  Running {rounds} rounds × 3 strategies ...")
         print("  Monitor:  tail -f logs/server.log\n")
@@ -359,29 +352,35 @@ Examples:
   python run_all.py --mode local --rounds 60
 
   # Real hardware — SSH into Xaviers automatically
+  # --server-private-ip: Chameleon's 172.28.x.x IP (what aggregators connect back to)
+  # --xavier-ips:        private IPs of the 5 Xaviers  (what clients connect to)
   python run_all.py --mode distributed \\
-      --server-ip 129.114.26.10 \\
-      --xavier-ips 192.168.1.10 192.168.1.11 192.168.1.12 192.168.1.13 192.168.1.14 \\
-      --ssh-user ubuntu
+      --server-private-ip 172.28.77.1 \\
+      --xavier-ips 172.28.77.10 172.28.77.11 172.28.77.12 172.28.77.13 172.28.77.14 \\
+      --ssh-user cc --pem-key ~/FLASH_v2.pem
 
-  # Real hardware — print commands instead of SSH-ing
+  # Real hardware — just print all commands, run them yourself
   python run_all.py --mode distributed --no-ssh \\
-      --server-ip 129.114.26.10 \\
-      --xavier-ips 192.168.1.10 192.168.1.11 192.168.1.12 192.168.1.13 192.168.1.14
+      --server-private-ip 172.28.77.1 \\
+      --xavier-ips 172.28.77.10 172.28.77.11 172.28.77.12 172.28.77.13 172.28.77.14
         """,
     )
     parser.add_argument("--mode", choices=["local", "distributed"], default="local",
                         help="'local' = everything on localhost; 'distributed' = real hardware")
 
     # Distributed-mode IPs
-    parser.add_argument("--server-ip",   type=str, default=None,
-                        help="[distributed] Public IP of this Chameleon server")
+    parser.add_argument("--server-private-ip", type=str, default=None,
+                        help="[distributed] Chameleon's private 172.28.x.x IP — "
+                             "what aggregators use to connect back to the server")
     parser.add_argument("--xavier-ips",  nargs=NUM_AGGREGATORS, metavar="IP", default=None,
-                        help=f"[distributed] IPs of the {NUM_AGGREGATORS} Jetson Xaviers")
-    parser.add_argument("--ssh-user",    type=str, default="ubuntu",
-                        help="[distributed] SSH username for Xaviers (default: ubuntu)")
+                        help=f"[distributed] Private IPs of the {NUM_AGGREGATORS} Jetson Xaviers "
+                             "(clients connect to these)")
+    parser.add_argument("--ssh-user",    type=str, default="cc",
+                        help="[distributed] SSH username for Xaviers (default: cc)")
+    parser.add_argument("--pem-key",     type=str, default=None,
+                        help="[distributed] Path to PEM key file, e.g. ~/FLASH_v2.pem")
     parser.add_argument("--no-ssh",      action="store_true",
-                        help="[distributed] Print aggregator/client commands instead of SSH-ing")
+                        help="[distributed] Print all commands instead of SSH-ing into Xaviers")
 
     # Common
     parser.add_argument("--rounds",         type=int,  default=ROUNDS)
@@ -395,8 +394,9 @@ Examples:
 
     # Validate distributed args
     if args.mode == "distributed":
-        if not args.server_ip:
-            parser.error("--mode distributed requires --server-ip")
+        if not args.server_private_ip:
+            parser.error("--mode distributed requires --server-private-ip "
+                         "(Chameleon's 172.28.x.x address)")
         if not args.xavier_ips:
             parser.error("--mode distributed requires --xavier-ips (5 IPs)")
 
@@ -410,8 +410,10 @@ Examples:
     print(f"  Output:      {args.output_dir}")
     print(f"  Logs:        {args.log_dir}")
     if args.mode == "distributed":
-        print(f"  Server IP:   {args.server_ip}")
-        print(f"  Xavier IPs:  {', '.join(args.xavier_ips)}")
+        print(f"  Server private IP: {args.server_private_ip}")
+        print(f"  Xavier IPs:        {', '.join(args.xavier_ips)}")
+        if args.pem_key:
+            print(f"  PEM key:           {args.pem_key}")
 
     t_start = time.time()
 
@@ -421,9 +423,10 @@ Examples:
         else:
             run_fl_distributed(
                 args.rounds, args.output_dir, log_dir,
-                server_ip=args.server_ip,
+                server_private_ip=args.server_private_ip,
                 xavier_ips=args.xavier_ips,
                 ssh_user=args.ssh_user,
+                pem_key=args.pem_key,
                 no_ssh=args.no_ssh,
             )
 
