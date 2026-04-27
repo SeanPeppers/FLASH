@@ -29,4 +29,6 @@ else
 fi
 
 # 6. Install remaining dependencies
-pip install flwr psutil pynvml pandas matplotlib
+# Pin flwr to 1.x — Flower 2.x deprecated start_server/start_numpy_client
+# in favour of flower-superlink which requires a full HFL architecture rewrite.
+pip install -r requirements.txt
