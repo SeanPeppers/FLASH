@@ -55,7 +55,7 @@ from clients import (
 )
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-NUM_LEAF_CLIENTS = 2
+NUM_LEAF_CLIENTS = 20   # 100 total clients / 5 aggregators
 LATENCY_THRESHOLD = 0.5
 
 
@@ -403,6 +403,8 @@ if __name__ == "__main__":
     parser.add_argument("--fixed-r", type=float, default=None,
                         help="Force a fixed compression ratio for ablation study "
                              "(e.g. 0.25, 0.5, 0.75, 1.0). Bypasses adaptive logic.")
+    parser.add_argument("--leaf-clients", type=int, default=NUM_LEAF_CLIENTS,
+                        help="Number of leaf clients connecting to this aggregator (default: 20)")
     args = parser.parse_args()
 
     inner_addr = f"0.0.0.0:{args.agg_port}"
@@ -428,9 +430,9 @@ if __name__ == "__main__":
             compression_options=list(COMPRESSION_OPTIONS),
             strategy_name=strategy_name,
             fixed_r=args.fixed_r,
-            min_fit_clients=NUM_LEAF_CLIENTS,
-            min_evaluate_clients=NUM_LEAF_CLIENTS,
-            min_available_clients=NUM_LEAF_CLIENTS,
+            min_fit_clients=args.leaf_clients,
+            min_evaluate_clients=args.leaf_clients,
+            min_available_clients=args.leaf_clients,
             fit_metrics_aggregation_fn=_agg_metrics,
             evaluate_metrics_aggregation_fn=_agg_metrics,
             initial_parameters=init_params,
@@ -453,12 +455,13 @@ if __name__ == "__main__":
         time.sleep(2.0)
 
         print(f"[Aggregator] Leaf clients should connect to: {leaf_addr}")
-        print(f"    python clients.py --cid 0 --agg-address {leaf_addr} --strategy {strategy_name}")
-        print(f"    python clients.py --cid 1 --agg-address {leaf_addr} --strategy {strategy_name}")
+        for _cid in range(args.leaf_clients):
+            print(f"    python clients.py --cid {_cid} --num-clients 100 "
+                  f"--agg-address {leaf_addr} --strategy {strategy_name}")
         print()
 
         # Connect upstream to the global server as a Flower client
-        agg_client = AggregatorClient(inner_strategy, NUM_LEAF_CLIENTS)
+        agg_client = AggregatorClient(inner_strategy, args.leaf_clients)
         print(f"[Aggregator] Connecting to global server at {args.server_address} ...")
         fl.client.start_numpy_client(server_address=args.server_address, client=agg_client)
 

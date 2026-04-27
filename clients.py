@@ -156,7 +156,7 @@ def compressed_size_bytes(packed_params: List[np.ndarray]) -> float:
 
 # ── Data loader ────────────────────────────────────────────────────────────────
 def load_data(
-    cid: int, data_workers: int = 0
+    cid: int, data_workers: int = 0, num_total_clients: int = 100
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """
     Load pre-downloaded MNIST. Raises a clear error if data is missing
@@ -184,8 +184,8 @@ def load_data(
         ldr = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True)
         return ldr, ldr
 
-    # Non-overlapping shard: cid 0 → even indices, cid 1 → odd indices
-    indices = [i for i in range(len(train_full)) if i % 2 == cid % 2]
+    # Non-overlapping shard: each client gets every Nth sample (N = num_total_clients)
+    indices = [i for i in range(len(train_full)) if i % num_total_clients == cid]
     train_ds = torch.utils.data.Subset(train_full, indices)
 
     # pin_memory=True helps on Jetson Nano (CUDA), no-op on Pi 5 (CPU only)
@@ -367,14 +367,14 @@ def build_metrics(
 
 # ── Base leaf client ───────────────────────────────────────────────────────────
 class BaseLeafClient(fl.client.NumPyClient):
-    def __init__(self, client_id: str, data_workers: int = 0):
+    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100):
         self.client_id = client_id
         self.cid_int = int(client_id)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = SimpleNet().to(self.device)
         self.criterion = nn.CrossEntropyLoss()
         self.base_lr = 0.01
-        self.train_loader, self.test_loader = load_data(self.cid_int, data_workers)
+        self.train_loader, self.test_loader = load_data(self.cid_int, data_workers, num_total_clients)
         # GradScaler for FP16 mixed-precision training on CUDA devices (no-op on CPU)
         self.scaler: Optional[torch.cuda.amp.GradScaler] = (
             torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
@@ -566,6 +566,8 @@ if __name__ == "__main__":
                         choices=list(CLIENT_REGISTRY.keys()) + ["all"])
     parser.add_argument("--data-workers", type=int, default=0,
                         help="DataLoader workers. 0 for Pi 5, 1-2 for Jetson Nano.")
+    parser.add_argument("--num-clients", type=int, default=100,
+                        help="Total number of leaf clients in the experiment (controls data sharding).")
     parser.add_argument("--reconnect-delay", type=float, default=5.0,
                         help="Seconds to wait before reconnecting after a round ends.")
     args = parser.parse_args()
@@ -575,7 +577,7 @@ if __name__ == "__main__":
     if args.strategy == "all":
         for strategy_name in ["flash", "flare", "fedavg"]:
             print(f"[Client {args.cid}] Starting strategy: {strategy_name}")
-            client = CLIENT_REGISTRY[strategy_name](args.cid, args.data_workers)
+            client = CLIENT_REGISTRY[strategy_name](args.cid, args.data_workers, args.num_clients)
             # Connect once for this experiment, retry on connection errors but
             # do not loop forever — move to next strategy once server disconnects us
             while True:
@@ -589,5 +591,5 @@ if __name__ == "__main__":
                     time.sleep(args.reconnect_delay)
         print(f"[Client {args.cid}] All strategies done.")
     else:
-        client = CLIENT_REGISTRY[args.strategy](args.cid, args.data_workers)
+        client = CLIENT_REGISTRY[args.strategy](args.cid, args.data_workers, args.num_clients)
         run_client_loop(client, args.agg_address, args.reconnect_delay)

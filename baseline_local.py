@@ -47,7 +47,7 @@ def run(rounds: int, epochs_per_round: int, output_dir: Path, cid: int = 0):
     criterion = nn.CrossEntropyLoss()
     scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
 
-    train_loader, test_loader = load_data(cid, data_workers=0)
+    train_loader, test_loader = load_data(cid, data_workers=0, num_total_clients=100)
 
     print(f"[LocalBaseline] device={device}  hw={hw_metrics.DEVICE}")
     print(f"[LocalBaseline] {rounds} rounds × {epochs_per_round} epochs  "

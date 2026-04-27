@@ -44,7 +44,7 @@ from clients import SimpleNet, get_parameters, TARGET_TAU, COMPRESSION_OPTIONS
 NUM_ROUNDS = 60
 LATENCY_THRESHOLD = 0.5
 ROLLING_WINDOW = 5
-NUM_AGGREGATORS = 1
+NUM_AGGREGATORS = 5
 
 
 # ── Metric aggregation ─────────────────────────────────────────────────────────
@@ -384,6 +384,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir",  type=str, default="./fl_results_hfl")
     parser.add_argument("--experiment",  type=str, default="all",
                         choices=["flash", "flare", "fedavg", "all"])
+    parser.add_argument("--aggregators",  type=int, default=NUM_AGGREGATORS,
+                        help="Number of mid-tier aggregators (default: 5)")
     parser.add_argument("--no-wait",     action="store_true",
                         help="Don't prompt between experiments (use when scripting)")
     parser.add_argument("--fixed-r",     type=float, default=None,
@@ -403,9 +405,9 @@ if __name__ == "__main__":
 
     init_params = ndarrays_to_parameters(get_parameters(SimpleNet()))
     common = dict(
-        min_fit_clients=NUM_AGGREGATORS,
-        min_evaluate_clients=NUM_AGGREGATORS,
-        min_available_clients=NUM_AGGREGATORS,
+        min_fit_clients=args.aggregators,
+        min_evaluate_clients=args.aggregators,
+        min_available_clients=args.aggregators,
         fit_metrics_aggregation_fn=_global_agg,
         evaluate_metrics_aggregation_fn=_global_agg,
         initial_parameters=init_params,

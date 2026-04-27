@@ -43,7 +43,7 @@ from clients import (
 # ── Config ─────────────────────────────────────────────────────────────────────
 BASE_LR = 0.01
 TARGET_TAU = 5.0
-NUM_CLIENTS = 2
+NUM_CLIENTS = 100
 
 
 def _load_pooled() -> tuple:
@@ -65,6 +65,7 @@ def _load_pooled() -> tuple:
 
     # Re-create each client's shard and concatenate — same split as FL experiment
     from torch.utils.data import Subset
+    # Reconstruct the same sharding as the FL experiment so no data is excluded
     shards = [
         Subset(train_full, [i for i in range(len(train_full)) if i % NUM_CLIENTS == cid])
         for cid in range(NUM_CLIENTS)
