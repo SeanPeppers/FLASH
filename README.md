@@ -26,8 +26,8 @@ All experiments write the same CSV columns so results are directly comparable.
 
 | Role | Device | IP |
 |------|--------|----|
-| Server | Chameleon Cloud node | `CHAMELEON_PUBLIC_IP` (public) / `CHAMELEON_PRIVATE_IP` (private) |
-| Aggregator | Jetson Xavier | `XAVIER_PRIVATE_IP` (private) |
+| Server | Chameleon Cloud node | `<CHAMELEON_PUBLIC_IP>` (public) / `<CHAMELEON_PRIVATE_IP>` (private) |
+| Aggregator | Jetson Xavier | `<XAVIER_PRIVATE_IP>` (private) |
 | Client 0 | Raspberry Pi 5 | connects to Xavier |
 | Client 1 | Jetson Nano | connects to Xavier |
 
@@ -80,7 +80,7 @@ python server.py \
 First, establish an SSH tunnel from the Xavier so it can reach the Chameleon server via localhost:
 
 ```bash
-ssh -i ../FLASH.pem -L 8080:127.0.0.1:8080 cc@CHAMELEON_PUBLIC_IP
+ssh -i ../FLASH.pem -L 8080:127.0.0.1:8080 cc@<CHAMELEON_PUBLIC_IP>
 ```
 
 > Keep this tunnel open in a separate terminal for the duration of the experiment.
@@ -109,7 +109,7 @@ python clients.py \
     --cid 0 \
     --num-clients 2 \
     --strategy all \
-    --agg-address XAVIER_PRIVATE_IP:8081
+    --agg-address <XAVIER_PRIVATE_IP>:8081
 ```
 
 **Jetson Nano** (CID 1):
@@ -118,7 +118,7 @@ python clients.py \
     --cid 1 \
     --num-clients 2 \
     --strategy all \
-    --agg-address XAVIER_PRIVATE_IP:8081
+    --agg-address <XAVIER_PRIVATE_IP>:8081
 ```
 
 > `--num-clients 2` ensures each client gets the correct MNIST shard (every 2nd sample).  
