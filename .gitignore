@@ -23,8 +23,9 @@ logs_smoke/
 # Downloaded datasets
 data/
 
-# Claude Code local config
+# Claude Code
 .claude/
+.mcp.json
 
 # OS
 .DS_Store
