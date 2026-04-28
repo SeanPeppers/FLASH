@@ -138,7 +138,7 @@ class _Pi5Collector:
         for cpu in sorted(Path("/sys/devices/system/cpu").glob("cpu[0-9]*")):
             f = _read(str(cpu / "cpufreq/scaling_cur_freq"), 0.0)
             if f > 0:
-                freqs.append(f / 1000.0)  # kHz → MHz
+                freqs.append(f / 1000.0)  # kHz -> MHz
         if freqs:
             m["cpu_freq_avg_mhz"] = float(sum(freqs) / len(freqs))
             for i, f in enumerate(freqs):
@@ -168,7 +168,7 @@ class _Pi5Collector:
             for pfile in sensor.glob("power*_input"):
                 rid = re.search(r"\d+", pfile.name)
                 key = f"hwmon_{name}_power{rid.group() if rid else ''}_mw"
-                m[key] = _read(str(pfile), 0.0) / 1000.0  # µW → mW
+                m[key] = _read(str(pfile), 0.0) / 1000.0  # µW -> mW
 
         return m
 

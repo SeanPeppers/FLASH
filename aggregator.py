@@ -440,12 +440,20 @@ if __name__ == "__main__":
 
         # Start the inner server in a background thread — it runs for all rounds
         def _run_inner_server(strategy=inner_strategy):
-            print(f"[Aggregator] Inner server listening on {inner_addr}")
-            fl.server.start_server(
-                server_address=inner_addr,
-                config=fl.server.ServerConfig(num_rounds=args.rounds),
-                strategy=strategy,
-            )
+            # flwr >=1.14 calls signal.signal() inside start_server, which raises
+            # ValueError in non-main threads.  Patch it to a no-op for this thread.
+            import signal as _sig
+            _orig_signal = _sig.signal
+            _sig.signal = lambda *a, **kw: None
+            try:
+                print(f"[Aggregator] Inner server listening on {inner_addr}")
+                fl.server.start_server(
+                    server_address=inner_addr,
+                    config=fl.server.ServerConfig(num_rounds=args.rounds),
+                    strategy=strategy,
+                )
+            finally:
+                _sig.signal = _orig_signal
             print("[Aggregator] Inner server finished all rounds.")
 
         inner_thread = threading.Thread(target=_run_inner_server, daemon=True)

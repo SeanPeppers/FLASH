@@ -101,17 +101,17 @@ Metric prefixes: leaf metrics → `leaf_`, aggregator metrics → `agg_`.
 - **Cause:** On Chameleon Cloud, IPMI command likely unavailable or permission-denied; no fallback to RAPL.
 - **Fix needed:** Diagnose which source is active; fall back to RAPL energy counters if IPMI returns 0.
 
-### BUG 2: `inf` values in `flash_HFL_fit_metrics.csv` (~20 rounds, ~80 infs)
-- **Affected columns:** `leaf_grad_norm_mean`, `leaf_energy_per_sample_j`, `leaf_epoch_*_grad_norm_max/mean`
-- **Cause 1:** `clients.py:309` — `np.mean([])` when gradient norm list is empty → NaN → cast to inf.
-- **Cause 2:** `clients.py:327` — `energy_j / total_s` where `total_s` check may be bypassed upstream.
-- **Fix needed:** Guard all gradient norm aggregations; ensure energy division is always protected.
-
 ### CONCERN: Accuracy volatility (4.69%–20.31%) + stagnant loss (0.73% improvement over 60 rounds)
 - Peak accuracy at Round 10 (20.31%), drops to 7.81% by Round 60.
 - Only 2 clients per round — global update is noisy.
 - No early stopping, no LR decay.
 - **Fix needed:** Early stopping on validation loss; consider LR scheduler.
+
+### FIXED (2026-04-27)
+- **`FLASHClient.__init__` signature mismatch** (`clients.py:406`): dropped `num_total_clients` param, crashing the 3-arg registry call. Added param and passed to `super()`.
+- **Signal handler in daemon thread** (`aggregator.py:444`): flwr 1.29.0 calls `signal.signal()` inside `start_server()`, which raises `ValueError` in non-main threads. Patched `signal.signal` to a no-op inside the inner server thread.
+- **Unicode chars in print statements** (`server.py`, `baseline_global.py`, `baseline_local.py`, `run_all.py`): `—`, `×`, `–`, `──`, `→` caused `UnicodeEncodeError` on Windows (CP1252). Replaced with ASCII equivalents.
+- **BUG 2 (`inf` values)**: Verified all `np.mean/max/min` calls in `build_metrics` are guarded by `if per_epoch:` or `if grad_norms else 0.0`; all divisions have `> 0` guards. Not a live bug.
 
 ---
 
@@ -130,6 +130,17 @@ Metric prefixes: leaf metrics → `leaf_`, aggregator metrics → `agg_`.
 6. Top-k sparsification ablation study (compare payload size vs accuracy)
 7. Autonomous adaptive compression (feedback loop on real-time jitter)
 8. Online cost model calibration (dynamic `k_comp`/`k_comm` weighting)
+
+---
+
+## MCP Tools Available
+
+| Tool | Purpose | How to use |
+|------|---------|------------|
+| **Serena** | LSP-based Python code navigation — jump-to-definition, find-references, symbol search | Ask to "find all references to `_pick_r`" or "navigate to `FLASHClient`" |
+| **ast-grep** | Structural AST pattern search — finds code by shape, not just text | Ask to "find all `np.mean(...)` calls with an empty list risk" or "find every dict return with an `energy` key" |
+| **fetch** | Fetch external docs on demand (Flower, PyTorch, gRPC) | Ask to "fetch the Flower strategy API docs" |
+| **gemini-cli** | Google Gemini CLI as a second AI — parallel code review, web research, architecture analysis | Invoke via `/gemini-cli`; useful for second opinions or current web info |
 
 ---
 

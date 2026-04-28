@@ -403,8 +403,8 @@ class BaseLeafClient(fl.client.NumPyClient):
 
 # ── FLASH ──────────────────────────────────────────────────────────────────────
 class FLASHClient(BaseLeafClient):
-    def __init__(self, client_id: str, data_workers: int = 0):
-        super().__init__(client_id, data_workers)
+    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100):
+        super().__init__(client_id, data_workers, num_total_clients)
         self._base_params: Optional[List[np.ndarray]] = None
 
     def fit(self, parameters, config: Dict) -> Tuple:

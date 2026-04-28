@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-baseline_local.py — Pure local training baseline (floor reference)
+baseline_local.py -- Pure local training baseline (floor reference)
 
 Trains the exact same SimpleNet on a single node using a single client's
 MNIST shard (even-index rows, matching cid=0 in the FL experiments).
@@ -35,7 +35,7 @@ from clients import (
     build_metrics, model_size_bytes, BATCH_SIZE, MAX_LOCAL_EPOCHS,
 )
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# -- Config ---------------------------------------------------------------------
 BASE_LR = 0.01
 TARGET_TAU = 5.0
 
@@ -50,7 +50,7 @@ def run(rounds: int, epochs_per_round: int, output_dir: Path, cid: int = 0):
     train_loader, test_loader = load_data(cid, data_workers=0, num_total_clients=100)
 
     print(f"[LocalBaseline] device={device}  hw={hw_metrics.DEVICE}")
-    print(f"[LocalBaseline] {rounds} rounds × {epochs_per_round} epochs  "
+    print(f"[LocalBaseline] {rounds} rounds x {epochs_per_round} epochs  "
           f"train_n={len(train_loader.dataset)}  test_n={len(test_loader.dataset)}")
 
     fit_rows:  List[Dict] = []

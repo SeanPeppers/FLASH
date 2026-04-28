@@ -16,6 +16,13 @@ checkpoints/
 # Jupyter
 .ipynb_checkpoints/
 
+# Logs and local test output
+logs/
+logs_smoke/
+
+# Downloaded datasets
+data/
+
 # Claude Code local config
 .claude/
 

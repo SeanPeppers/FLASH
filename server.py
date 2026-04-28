@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-server.py — Global coordinator on Chameleon Cloud
+server.py -- Global coordinator on Chameleon Cloud
 
-No changes to the core FL logic — this file is updated to:
+No changes to the core FL logic -- this file is updated to:
   - Remove the interactive input() prompt between experiments
   - Accept --no-wait flag for running a single experiment non-interactively
   - Add a startup banner showing all connection addresses
@@ -40,14 +40,14 @@ import hw_metrics
 from hw_metrics import EnergyAccumulator, snapshot, delta
 from clients import SimpleNet, get_parameters, TARGET_TAU, COMPRESSION_OPTIONS
 
-# ── Configuration ──────────────────────────────────────────────────────────────
+# -- Configuration --------------------------------------------------------------
 NUM_ROUNDS = 60
 LATENCY_THRESHOLD = 0.5
 ROLLING_WINDOW = 5
 NUM_AGGREGATORS = 5
 
 
-# ── Metric aggregation ─────────────────────────────────────────────────────────
+# -- Metric aggregation ---------------------------------------------------------
 def _global_agg(all_metrics: List[Tuple[int, Dict[str, Scalar]]]) -> Dict[str, Scalar]:
     weighted = {
         "accuracy", "loss", "train_accuracy_final", "train_loss_final",
@@ -81,7 +81,7 @@ def _global_agg(all_metrics: List[Tuple[int, Dict[str, Scalar]]]) -> Dict[str, S
     return out
 
 
-# ── Per-round server hardware logger ──────────────────────────────────────────
+# -- Per-round server hardware logger ------------------------------------------
 class RoundHWLogger:
     """Wraps a strategy to capture Chameleon-side hw metrics per round."""
 
@@ -139,10 +139,10 @@ class RoundHWLogger:
         df = pd.DataFrame(self._rows)
         path = self._output_dir / f"{self._name}_server_hw.csv"
         df.to_csv(path, index=False)
-        print(f"  saved server hw metrics → {path}")
+        print(f"  saved server hw metrics -> {path}")
 
 
-# ── FLASH global strategy ──────────────────────────────────────────────────────
+# -- FLASH global strategy ------------------------------------------------------
 class FLASHGlobalStrategy(FedAvg):
     def __init__(self, bar_tau_r: float, t_thr: float,
                  compression_options: Set[float],
@@ -229,7 +229,7 @@ class FLASHGlobalStrategy(FedAvg):
         return agg
 
 
-# ── FLARE global strategy ──────────────────────────────────────────────────────
+# -- FLARE global strategy ------------------------------------------------------
 class FLAREGlobalStrategy(FedAvg):
     def configure_fit(self, server_round, parameters, client_manager):
         aggs = client_manager.sample(
@@ -240,7 +240,7 @@ class FLAREGlobalStrategy(FedAvg):
         return [(agg, FitIns(parameters, cfg)) for agg in aggs]
 
 
-# ── CSV / plot helpers ─────────────────────────────────────────────────────────
+# -- CSV / plot helpers ---------------------------------------------------------
 def save_csvs(history, name: str, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -343,7 +343,7 @@ def plot_all(histories: Dict[str, Any], output_dir: Path, t_thr: float):
         path = output_dir / f"{safe}.png"
         plt.savefig(path, dpi=150)
         plt.close()
-        print(f"  saved plot → {path}")
+        print(f"  saved plot -> {path}")
 
 
 def plot_hw_dashboard(hw_csv_map: Dict[str, Path], output_dir: Path):
@@ -356,7 +356,7 @@ def plot_hw_dashboard(hw_csv_map: Dict[str, Path], output_dir: Path):
     ]
     fig, axes = plt.subplots(len(hw_keys), 1,
                              figsize=(12, 3 * len(hw_keys)), sharex=True)
-    fig.suptitle("Chameleon Cloud — server hardware per round", fontsize=14)
+    fig.suptitle("Chameleon Cloud -- server hardware per round", fontsize=14)
     for ax, (key, label) in zip(axes, hw_keys):
         for exp, csv_path in hw_csv_map.items():
             if not csv_path.exists():
@@ -373,10 +373,10 @@ def plot_hw_dashboard(hw_csv_map: Dict[str, Path], output_dir: Path):
     path = output_dir / "chameleon_hw_dashboard.png"
     plt.savefig(path, dpi=150)
     plt.close()
-    print(f"  saved hw dashboard → {path}")
+    print(f"  saved hw dashboard -> {path}")
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# -- Entry point ----------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HFL global server (Chameleon Cloud)")
     parser.add_argument("--rounds",      type=int, default=NUM_ROUNDS)
@@ -396,7 +396,7 @@ if __name__ == "__main__":
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[Server] Chameleon Cloud — device: {hw_metrics.DEVICE}")
+    print(f"[Server] Chameleon Cloud -- device: {hw_metrics.DEVICE}")
     print(f"[Server] Listening on 0.0.0.0:{args.port} for {args.rounds} rounds")
     print(f"[Server] hw snapshot:")
     for k, v in sorted(snapshot().items()):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-baseline_global.py — Global pooled training baseline (ceiling reference)
+baseline_global.py -- Global pooled training baseline (ceiling reference)
 
 Simulates the oracle upper bound: all client data is pooled on the server
 and trained in a standard centralized fashion. No federation, no communication,
@@ -40,7 +40,7 @@ from clients import (
     DATA_DIR,
 )
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# -- Config ---------------------------------------------------------------------
 BASE_LR = 0.01
 TARGET_TAU = 5.0
 NUM_CLIENTS = 100
@@ -63,7 +63,7 @@ def _load_pooled() -> tuple:
             f"MNIST('{DATA_DIR}', download=True)\""
         )
 
-    # Re-create each client's shard and concatenate — same split as FL experiment
+    # Re-create each client's shard and concatenate -- same split as FL experiment
     from torch.utils.data import Subset
     # Reconstruct the same sharding as the FL experiment so no data is excluded
     shards = [
@@ -92,9 +92,9 @@ def run(rounds: int, epochs_per_round: int, output_dir: Path):
     train_loader, test_loader = _load_pooled()
 
     print(f"[GlobalBaseline] device={device}  hw={hw_metrics.DEVICE}")
-    print(f"[GlobalBaseline] Pooled {NUM_CLIENTS} client shards → "
+    print(f"[GlobalBaseline] Pooled {NUM_CLIENTS} client shards -> "
           f"{len(train_loader.dataset)} train / {len(test_loader.dataset)} test")
-    print(f"[GlobalBaseline] {rounds} rounds × {epochs_per_round} epochs")
+    print(f"[GlobalBaseline] {rounds} rounds x {epochs_per_round} epochs")
 
     fit_rows:  List[Dict] = []
     eval_rows: List[Dict] = []
