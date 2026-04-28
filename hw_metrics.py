@@ -266,18 +266,50 @@ class _JetsonCollector:
 class _ChameleonCollector:
     _RAPL = Path("/sys/class/powercap/intel-rapl")
 
+    def __init__(self):
+        # State for RAPL delta-based instantaneous power estimation.
+        # RAPL exposes cumulative energy counters (uJ); power = delta / dt.
+        self._prev_rapl_uj: Dict[str, float] = {}
+        self._prev_ts: float = 0.0
+
     def snapshot(self) -> Dict[str, float]:
         m = _psutil_common()
 
-        # RAPL energy counters
+        # RAPL energy counters + instantaneous power via delta
         if self._RAPL.exists():
+            now = time.monotonic()
+            cur_uj: Dict[str, float] = {}
             for ef in self._RAPL.rglob("energy_uj"):
                 parts = [p for p in ef.parts if "intel-rapl" in p]
                 safe = re.sub(r"[^a-zA-Z0-9_]", "_", "_".join(parts))
-                m[f"rapl_{safe}_energy_mj"] = _read(str(ef), 0.0) / 1000.0
+                val = _read(str(ef), 0.0)
+                cur_uj[safe] = val
+                m[f"rapl_{safe}_energy_mj"] = val / 1000.0
 
-        # IPMI — cached (slow command)
+            dt = now - self._prev_ts
+            if self._prev_rapl_uj and dt > 0:
+                # Sum only top-level package domains (2 "intel-rapl" path segments)
+                # to avoid double-counting sub-domains (core, uncore).
+                # Package keys: "intel_rapl_intel_rapl_0"  (count == 2)
+                # Sub-domain:   "intel_rapl_intel_rapl_0_intel_rapl_0_0" (count == 3)
+                total_delta_uj = 0.0
+                for key, val in cur_uj.items():
+                    if key.count("intel_rapl_") == 2:
+                        prev = self._prev_rapl_uj.get(key, val)
+                        delta_uj = val - prev
+                        if delta_uj < 0:
+                            delta_uj += 262144.0 * 1e6  # counter wrap (~262 kJ max)
+                        total_delta_uj += delta_uj
+                if total_delta_uj > 0:
+                    m["rapl_power_mw"] = (total_delta_uj / 1e3) / dt  # uJ/s -> mW
+
+            self._prev_rapl_uj = cur_uj
+            self._prev_ts = now
+
+        # IPMI -- try plain then sudo (Chameleon often requires elevated perms)
         ipmi_out = _run_cached("ipmitool dcmi power reading")
+        if not ipmi_out:
+            ipmi_out = _run_cached("sudo ipmitool dcmi power reading")
         ipmi_m = re.search(r"Instantaneous power reading:\s*([\d.]+)\s*Watts", ipmi_out)
         if ipmi_m:
             m["ipmi_system_power_w"] = float(ipmi_m.group(1))
@@ -416,16 +448,21 @@ class EnergyAccumulator:
     def _loop(self):
         while self._running:
             m = snapshot()
-            # Use explicit None checks so a legitimate 0.0 reading doesn't
-            # fall through to the next source in the priority chain.
+            # Priority order: most accurate / direct source first.
             if m.get("power_total_soc_mw") is not None:
+                # Jetson: INA3221 SoC rail total (direct mW)
                 power_mw = m["power_total_soc_mw"]
-            elif m.get("gpu_power_nvml_mw") is not None:
-                power_mw = m["gpu_power_nvml_mw"]
             elif "ipmi_system_power_w" in m:
+                # Chameleon: IPMI whole-system power (most accurate)
                 power_mw = m["ipmi_system_power_w"] * 1000.0
+            elif "rapl_power_mw" in m:
+                # Chameleon: RAPL CPU package power (IPMI unavailable)
+                power_mw = m["rapl_power_mw"]
+            elif m.get("gpu_power_nvml_mw") is not None:
+                # Jetson: NVML GPU power fallback
+                power_mw = m["gpu_power_nvml_mw"]
             else:
-                # Chameleon/generic: GPU power is stored as gpu{idx}_{name}_power_mw
+                # Generic: dynamic-key GPU power (gpu{idx}_{name}_power_mw)
                 gpu_powers = [v for k, v in m.items() if k.endswith("_power_mw") and v > 0]
                 power_mw = sum(gpu_powers) if gpu_powers else 0.0
             with self._lock:
