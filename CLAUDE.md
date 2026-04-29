@@ -25,7 +25,9 @@ Hardware telemetry for all tiers is in `hw_metrics.py`.
 | `aggregator.py` | Mid-tier aggregator; runs on Jetson Xavier | 1,423 |
 | `clients.py` | Leaf clients; runs on Pi 5 / Jetson Nano | 1,579 |
 | `hw_metrics.py` | Hardware-aware metrics collection for all tiers | 1,440 |
-| `fl_results_hfl/` | Output directory for all CSV results | — |
+| `log_server.py` | Central log aggregator; run on Chameleon before experiment | — |
+| `verify_flash.py` | Local pipeline verification (compression + aggregation + training) | — |
+| `fl_results_hfl/` | Output directory for all CSV results and per-device debug logs | — |
 
 ---
 
@@ -57,8 +59,9 @@ Hardware telemetry for all tiers is in `hw_metrics.py`.
 - `_JetsonCollector` (lines 177–262): Tegra INA3221 + NVML + DLA.
 - `_ChameleonCollector` (lines 266–338): Intel RAPL + IPMI + NVML.
 - `_GenericCollector` (lines 341–351): psutil + NVML fallback.
-- `EnergyAccumulator` (lines 391–433): Polls every 1 s, integrates `power_mw * interval` → joules.
-  - Power source priority (lines 419–423): `power_total_soc_mw` → `gpu_power_nvml_mw` → `ipmi_system_power_w * 1000`
+- `EnergyAccumulator` (lines 391–433): Polls every 1 s, integrates `power_mw * real_elapsed` → joules. Tail-window added in `stop_and_get_joules` to capture time since last poll (critical for server-side rounds < 1 s).
+  - Power source priority: `power_total_soc_mw` → `ipmi_system_power_w` → `rapl_power_mw` → `gpu_power_nvml_mw` → dynamic `_power_mw` key
+- `_setup_logging` / `_DeviceFilter`: auto-configures on import → `fl_results_hfl/flash_debug_{device}.log`. Set `FLASH_LOG_SERVER=<ip>` to also stream to `log_server.py` on Chameleon.
 
 ---
 
@@ -96,31 +99,30 @@ Metric prefixes: leaf metrics → `leaf_`, aggregator metrics → `agg_`.
 
 ## Known Bugs & Active Work
 
-### BUG 1: Power logging returns 0.0 mW (showstopper for energy paper)
-- **Location:** `hw_metrics.py:419–423` (`EnergyAccumulator._loop`)
-- **Cause:** On Chameleon Cloud, IPMI command likely unavailable or permission-denied; no fallback to RAPL.
-- **Fix needed:** Diagnose which source is active; fall back to RAPL energy counters if IPMI returns 0.
+### OPEN: RAPL reads 0 on Chameleon (minor — GPU NVML is active fallback)
+- RAPL sysfs files likely permission-denied without sudo. Energy is captured via GPU NVML (~53 W idle P100s).
+- CPU+memory power not included. Acceptable for paper; note in methodology.
+- To fix: `sudo python server.py` or `sudo setcap cap_sys_rawio+ep /usr/bin/python3` on Chameleon.
 
-### CONCERN: Accuracy volatility (4.69%–20.31%) + stagnant loss (0.73% improvement over 60 rounds)
-- Peak accuracy at Round 10 (20.31%), drops to 7.81% by Round 60.
-- Only 2 clients per round — global update is noisy.
-- No early stopping, no LR decay.
-- **Fix needed:** Early stopping on validation loss; consider LR scheduler.
+### FIXED (2026-04-28)
+- **BUG 1 — Power logging 0.0 mW** (`hw_metrics.py`): Pi5 never emitted `power_total_soc_mw`; Jetson INA3221 i2c paths failed on newer kernels. Fixed: Pi5 sums hwmon rails; Jetson adds hwmon fallback. EnergyAccumulator now uses real elapsed time + tail-window.
+- **SHOWSTOPPER — Learning collapse** (`aggregator.py:~225`): FLASHClient always sends deltas but aggregator only reconstructed `base+delta` when `r < 1.0`. Round 2 (r=1.0) averaged raw deltas as full weights → near-zero global model → loss stuck at 2.303 for all 60 rounds. Fixed: always add base to delta for FLASH strategy.
+- Verified locally with `verify_flash.py`: compression round-trip PASS, aggregation regression PASS, 5-round MNIST training PASS (loss 2.30→0.34, acc 7.5%→90.8%).
 
 ### FIXED (2026-04-27)
-- **`FLASHClient.__init__` signature mismatch** (`clients.py:406`): dropped `num_total_clients` param, crashing the 3-arg registry call. Added param and passed to `super()`.
-- **Signal handler in daemon thread** (`aggregator.py:444`): flwr 1.29.0 calls `signal.signal()` inside `start_server()`, which raises `ValueError` in non-main threads. Patched `signal.signal` to a no-op inside the inner server thread.
-- **Unicode chars in print statements** (`server.py`, `baseline_global.py`, `baseline_local.py`, `run_all.py`): `—`, `×`, `–`, `──`, `→` caused `UnicodeEncodeError` on Windows (CP1252). Replaced with ASCII equivalents.
-- **BUG 2 (`inf` values)**: Verified all `np.mean/max/min` calls in `build_metrics` are guarded by `if per_epoch:` or `if grad_norms else 0.0`; all divisions have `> 0` guards. Not a live bug.
+- **`FLASHClient.__init__` signature mismatch** (`clients.py:406`): dropped `num_total_clients` param. Added and passed to `super()`.
+- **Signal handler in daemon thread** (`aggregator.py:444`): flwr 1.29.0 raises `ValueError` in non-main threads. Patched to no-op.
+- **Unicode chars in print statements**: caused `UnicodeEncodeError` on Windows. Replaced with ASCII.
+- **BUG 2 (`inf` values)**: Verified guarded. Not a live bug.
 
 ---
 
 ## Planned Work (Action Plan)
 
 ### Phase 1 — Critical Fixes
-1. Fix power logging (0.0 mW on Chameleon)
+1. ~~Fix power logging (0.0 mW on Chameleon)~~ DONE
 2. Implement early stopping in `FLASHGlobalStrategy`
-3. Sanitize inf values in `build_metrics` / `train_one_epoch`
+3. ~~Sanitize inf values~~ — verified not a live bug
 
 ### Phase 2 — Baselines
 4. Pure local training baseline script
@@ -147,14 +149,23 @@ Metric prefixes: leaf metrics → `leaf_`, aggregator metrics → `agg_`.
 ## Invocation
 
 ```bash
-# Server (Chameleon Cloud)
+# 0. Start central log aggregator on Chameleon (do this first)
+python log_server.py
+
+# 1. Server (Chameleon Cloud)
+export FLASH_LOG_SERVER=<chameleon_ip>
 python server.py --rounds 60 --port 8080 --experiment all
 
-# Aggregator (Xavier)
+# 2. Aggregator (Xavier)
+export FLASH_LOG_SERVER=<chameleon_ip>
 python aggregator.py --strategy flash --agg-port 8081 --server-address <IP>:8080 --rounds 60
 
-# Client (Pi 5 / Nano)
+# 3. Client (Pi 5 / Nano)
+export FLASH_LOG_SERVER=<chameleon_ip>
 python clients.py --cid 0 --agg-address <IP>:8081 --strategy flash
+
+# Verify pipeline locally before any hardware run
+python verify_flash.py
 ```
 
 ---

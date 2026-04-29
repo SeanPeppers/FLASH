@@ -46,8 +46,12 @@ from flwr.common import (
 )
 from flwr.server.strategy import FedAvg
 
+import logging
+
 import hw_metrics
 from hw_metrics import EnergyAccumulator, snapshot, delta
+
+_log = logging.getLogger("flash.aggregator")
 from clients import (
     SimpleNet, get_parameters, set_parameters, model_size_bytes,
     TARGET_TAU, COMPRESSION_OPTIONS, MAX_LOCAL_EPOCHS,
@@ -224,10 +228,28 @@ class _InnerStrategy(FedAvg):
             decompressed = []
             for client, fit_res in results:
                 r = fit_res.metrics.get("compression_ratio_applied", 1.0)
-                if r < 1.0 and base is not None:
-                    delta = decompress_topk(parameters_to_ndarrays(fit_res.parameters))
-                    full = [b.astype(np.float32) + d for b, d in zip(base, delta)]
+                if base is not None:
+                    raw = parameters_to_ndarrays(fit_res.parameters)
+                    # FLASH always sends deltas; decompress_topk only needed when r < 1.0
+                    d = decompress_topk(raw) if r < 1.0 else raw
+                    full = [b.astype(np.float32) + di for b, di in zip(base, d)]
+                    delta_norm = float(np.sqrt(sum(np.sum(di**2) for di in d)))
+                    full_norm  = float(np.sqrt(sum(np.sum(fi**2) for fi in full)))
+                    _log.info(
+                        "[R%d cid=%s] r=%.2f  mode=%s  delta_norm=%.4f  reconstructed_norm=%.4f",
+                        self._global_round, client.cid, r,
+                        "decompress+add" if r < 1.0 else "raw+add",
+                        delta_norm, full_norm,
+                    )
+                    if full_norm < 0.1:
+                        _log.warning(
+                            "[R%d cid=%s] reconstructed_norm=%.4f is suspiciously small — model may be corrupted",
+                            self._global_round, client.cid, full_norm,
+                        )
                     fit_res = dataclasses.replace(fit_res, parameters=ndarrays_to_parameters(full))
+                else:
+                    _log.warning("[R%d cid=%s] base params are None — skipping delta reconstruction",
+                                 self._global_round, client.cid)
                 decompressed.append((client, fit_res))
             results = decompressed
 

@@ -19,6 +19,8 @@ Install (all devices):
 
 from __future__ import annotations
 
+import logging
+import logging.handlers
 import os
 import re
 import subprocess
@@ -77,6 +79,74 @@ def detect_device() -> str:
 DEVICE = detect_device()
 
 
+# ── Logging setup ──────────────────────────────────────────────────────────────
+# Set FLASH_LOG_SERVER=<chameleon_ip>:9020 on each device to stream all logs
+# to the central log_server.py running on Chameleon. Falls back to local file only.
+
+LOG_SERVER_PORT = 9020
+
+
+class _DeviceFilter(logging.Filter):
+    """Injects %(device)s into every log record so the aggregated log shows the source."""
+    def __init__(self, device: str):
+        super().__init__()
+        self.device = device
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.device = self.device
+        return True
+
+
+def _setup_logging(device: str) -> logging.Logger:
+    log_dir = Path("fl_results_hfl")
+    log_dir.mkdir(exist_ok=True)
+    log_path = log_dir / f"flash_debug_{device}.log"
+
+    fmt = logging.Formatter(
+        "%(asctime)s.%(msecs)03d | %(levelname)-8s | %(device)-14s | %(name)-12s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    device_filter = _DeviceFilter(device)
+
+    root = logging.getLogger("flash")
+    root.setLevel(logging.DEBUG)
+    root.addFilter(device_filter)
+
+    if not root.handlers:
+        fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+
+        sh = logging.StreamHandler()
+        sh.setLevel(logging.WARNING)
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+
+    # Optional: stream to central log server on Chameleon
+    # Set FLASH_LOG_SERVER=<chameleon_ip>  (port defaults to 9020)
+    log_server_env = os.environ.get("FLASH_LOG_SERVER", "").strip()
+    if log_server_env:
+        host, _, port_str = log_server_env.partition(":")
+        port = int(port_str) if port_str else LOG_SERVER_PORT
+        try:
+            socket_handler = logging.handlers.SocketHandler(host, port)
+            socket_handler.setLevel(logging.DEBUG)
+            root.addHandler(socket_handler)
+            root.info("Log streaming enabled -> %s:%d", host, port)
+        except Exception as exc:
+            root.warning("Could not attach log socket handler (%s:%d): %s", host, port, exc)
+
+    root.info("=" * 60)
+    root.info("FLASH logging started  device=%s  log=%s", device, log_path)
+    root.info("=" * 60)
+    return root
+
+
+_log = _setup_logging(DEVICE)
+_hw_log = logging.getLogger("flash.hw")
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def _read(path: str, default: float = 0.0) -> float:
     try:
@@ -130,6 +200,9 @@ def _psutil_common() -> Dict[str, float]:
 
 # ── Pi 5 collector ─────────────────────────────────────────────────────────────
 class _Pi5Collector:
+    def __init__(self):
+        self._logged = False
+
     def snapshot(self) -> Dict[str, float]:
         m = _psutil_common()
 
@@ -160,6 +233,7 @@ class _Pi5Collector:
             m["core_voltage_v"] = float(match.group(1))
 
         # hwmon power rails (INA3221 if wired)
+        hwmon_total_mw = 0.0
         for sensor in Path("/sys/class/hwmon").glob("hwmon*"):
             name_file = sensor / "name"
             if not name_file.exists():
@@ -167,18 +241,35 @@ class _Pi5Collector:
             name = name_file.read_text().strip()
             for pfile in sensor.glob("power*_input"):
                 rid = re.search(r"\d+", pfile.name)
+                val_mw = _read(str(pfile), 0.0) / 1000.0  # µW -> mW
                 key = f"hwmon_{name}_power{rid.group() if rid else ''}_mw"
-                m[key] = _read(str(pfile), 0.0) / 1000.0  # µW -> mW
+                m[key] = val_mw
+                hwmon_total_mw += val_mw
+        if hwmon_total_mw > 0:
+            m["power_total_soc_mw"] = hwmon_total_mw
+
+        if not self._logged:
+            self._logged = True
+            rail_details = {k: v for k, v in m.items() if k.startswith("hwmon_") and k.endswith("_mw")}
+            if rail_details:
+                detail_str = "  ".join(f"{k}={v:.1f}mW" for k, v in sorted(rail_details.items()))
+                _hw_log.info("[Pi5] hwmon rails found: %s -> power_total_soc_mw=%.1f mW",
+                             detail_str, m.get("power_total_soc_mw", 0.0))
+            else:
+                _hw_log.warning("[Pi5] NO hwmon power rails found — energy will read 0.0 J")
 
         return m
 
 
 # ── Jetson collector (Nano + Xavier) ──────────────────────────────────────────
 class _JetsonCollector:
+    def __init__(self):
+        self._logged = False
+
     def snapshot(self) -> Dict[str, float]:
         m = _psutil_common()
 
-        # Tegra INA3221 power rails
+        # Tegra INA3221 power rails — try i2c driver paths first, then hwmon
         rail_total = 0.0
         for base in ["/sys/bus/i2c/drivers/ina3221x", "/sys/bus/i2c/devices"]:
             p = Path(base)
@@ -193,8 +284,32 @@ class _JetsonCollector:
                 safe = re.sub(r"[^a-zA-Z0-9_]", "_", rail_name).lower()
                 m[f"power_{safe}_mw"] = float(val_mw)
                 rail_total += val_mw
+        if rail_total == 0:
+            # Xavier NX/AGX exposes INA3221 via hwmon on newer kernels
+            for sensor in Path("/sys/class/hwmon").glob("hwmon*"):
+                name_file = sensor / "name"
+                if not name_file.exists():
+                    continue
+                if "ina3221" not in name_file.read_text().strip().lower():
+                    continue
+                for pfile in sensor.glob("power*_input"):
+                    val_mw = _read(str(pfile), 0.0) / 1000.0  # µW -> mW
+                    rid = re.search(r"\d+", pfile.name)
+                    m[f"power_hwmon_rail{rid.group() if rid else ''}_mw"] = val_mw
+                    rail_total += val_mw
         if rail_total > 0:
             m["power_total_soc_mw"] = rail_total
+
+        if not self._logged:
+            self._logged = True
+            rail_keys = {k: v for k, v in m.items() if k.startswith("power_") and k.endswith("_mw")}
+            if rail_keys:
+                detail_str = "  ".join(f"{k}={v:.1f}mW" for k, v in sorted(rail_keys.items()))
+                source = "i2c" if any("hwmon" not in k for k in rail_keys) else "hwmon"
+                _hw_log.info("[Jetson] INA3221 via %s: %s -> power_total_soc_mw=%.1f mW",
+                             source, detail_str, rail_total)
+            else:
+                _hw_log.warning("[Jetson] NO INA3221 rails found (tried i2c + hwmon) — energy will read 0.0 J")
 
         # CPU frequencies
         freqs = []
@@ -271,6 +386,7 @@ class _ChameleonCollector:
         # RAPL exposes cumulative energy counters (uJ); power = delta / dt.
         self._prev_rapl_uj: Dict[str, float] = {}
         self._prev_ts: float = 0.0
+        self._logged = False
 
     def snapshot(self) -> Dict[str, float]:
         m = _psutil_common()
@@ -313,6 +429,34 @@ class _ChameleonCollector:
         ipmi_m = re.search(r"Instantaneous power reading:\s*([\d.]+)\s*Watts", ipmi_out)
         if ipmi_m:
             m["ipmi_system_power_w"] = float(ipmi_m.group(1))
+
+        if not self._logged:
+            self._logged = True
+            rapl_files = list(self._RAPL.rglob("energy_uj")) if self._RAPL.exists() else []
+            rapl_vals = {str(f): _read(str(f), -1.0) for f in rapl_files}
+            readable = {k: v for k, v in rapl_vals.items() if v >= 0}
+            unreadable = [k for k, v in rapl_vals.items() if v < 0]
+            _hw_log.info("[Chameleon] RAPL path exists=%s  files_found=%d  readable=%d  unreadable=%d",
+                         self._RAPL.exists(), len(rapl_files), len(readable), len(unreadable))
+            if unreadable:
+                _hw_log.warning("[Chameleon] RAPL files permission-denied (run with sudo?): %s",
+                                unreadable[:3])
+            if readable:
+                sample = list(readable.items())[:2]
+                _hw_log.info("[Chameleon] RAPL sample values: %s",
+                             "  ".join(f"{Path(k).parent.name}={v:.0f}uJ" for k, v in sample))
+            else:
+                _hw_log.warning("[Chameleon] RAPL returned all zeros/unreadable — will fall back to GPU power")
+            if "ipmi_system_power_w" in m:
+                _hw_log.info("[Chameleon] IPMI available: %.1f W", m["ipmi_system_power_w"])
+            else:
+                _hw_log.warning("[Chameleon] IPMI unavailable — energy source will be RAPL or GPU NVML")
+            gpu_keys = [k for k in m if k.endswith("_power_mw")]
+            if gpu_keys:
+                gpu_str = "  ".join(f"{k}={m[k]:.0f}mW" for k in gpu_keys)
+                _hw_log.info("[Chameleon] GPU NVML power: %s", gpu_str)
+            else:
+                _hw_log.warning("[Chameleon] No GPU NVML power keys found")
 
         # CPU frequencies
         freqs = psutil.cpu_freq(percpu=True) or []
@@ -438,43 +582,94 @@ class EnergyAccumulator:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._last_ts: float = 0.0
+        self._last_power_mw: float = 0.0
+        self._poll_count: int = 0
+        self._log_ts: float = 0.0  # time of last periodic log line
+        self._log = logging.getLogger("flash.energy")
 
     def start(self):
         self._energy_mj = 0.0
+        self._last_ts = time.monotonic()
+        self._last_power_mw = 0.0
+        self._poll_count = 0
+        self._log_ts = time.monotonic()
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def _loop(self):
+        self._last_ts = time.monotonic()
+        self._last_power_mw = 0.0
         while self._running:
             m = snapshot()
-            # Priority order: most accurate / direct source first.
+            now = time.monotonic()
+            elapsed = now - self._last_ts
+            self._last_ts = now
+
             if m.get("power_total_soc_mw") is not None:
-                # Jetson: INA3221 SoC rail total (direct mW)
+                source = "power_total_soc_mw"
                 power_mw = m["power_total_soc_mw"]
             elif "ipmi_system_power_w" in m:
-                # Chameleon: IPMI whole-system power (most accurate)
+                source = "ipmi_system_power_w"
                 power_mw = m["ipmi_system_power_w"] * 1000.0
             elif "rapl_power_mw" in m:
-                # Chameleon: RAPL CPU package power (IPMI unavailable)
+                source = "rapl_power_mw"
                 power_mw = m["rapl_power_mw"]
             elif m.get("gpu_power_nvml_mw") is not None:
-                # Jetson: NVML GPU power fallback
+                source = "gpu_power_nvml_mw"
                 power_mw = m["gpu_power_nvml_mw"]
             else:
-                # Generic: dynamic-key GPU power (gpu{idx}_{name}_power_mw)
                 gpu_powers = [v for k, v in m.items() if k.endswith("_power_mw") and v > 0]
                 power_mw = sum(gpu_powers) if gpu_powers else 0.0
+                source = "gpu_dynamic" if power_mw > 0 else "NONE"
+
             with self._lock:
-                self._energy_mj += float(power_mw) * self.interval
+                self._energy_mj += float(power_mw) * elapsed
+                self._last_power_mw = float(power_mw)
+                self._poll_count += 1
+                poll_n = self._poll_count
+                energy_so_far = self._energy_mj
+
+            # Log on first poll, then every 30 s
+            if poll_n == 1:
+                if power_mw == 0.0:
+                    self._log.warning(
+                        "poll#1  source=%s  power=0.0 mW — energy will accumulate as 0 J  elapsed=%.3fs",
+                        source, elapsed,
+                    )
+                else:
+                    self._log.info(
+                        "poll#1  source=%s  power=%.1f mW  elapsed=%.3fs",
+                        source, power_mw, elapsed,
+                    )
+            elif now - self._log_ts >= 30.0:
+                self._log_ts = now
+                self._log.debug(
+                    "poll#%d  source=%s  power=%.1f mW  energy_so_far=%.3f J",
+                    poll_n, source, power_mw, energy_so_far / 1000.0,
+                )
+
             time.sleep(self.interval)
 
     def stop_and_get_joules(self) -> float:
         self._running = False
+        stop_ts = time.monotonic()
         if self._thread:
             self._thread.join(timeout=3)
+        # Account for time elapsed since the last poll (covers short rounds where
+        # the background thread may not have fired again before stop was called).
         with self._lock:
-            return self._energy_mj / 1000.0
+            tail_elapsed = stop_ts - getattr(self, "_last_ts", stop_ts)
+            if tail_elapsed > 0:
+                self._energy_mj += self._last_power_mw * tail_elapsed
+            joules = self._energy_mj / 1000.0
+
+        self._log.info(
+            "stop  polls=%d  last_power=%.1f mW  tail_elapsed=%.3fs  total=%.4f J",
+            self._poll_count, self._last_power_mw, tail_elapsed, joules,
+        )
+        return joules
 
 
 if __name__ == "__main__":

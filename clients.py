@@ -47,8 +47,12 @@ import torch.optim as optim
 import flwr as fl
 from collections import OrderedDict
 
+import logging
+
 import hw_metrics
 from hw_metrics import EnergyAccumulator, snapshot, delta
+
+_log = logging.getLogger("flash.clients")
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 TARGET_TAU = 5.0
@@ -442,6 +446,19 @@ class FLASHClient(BaseLeafClient):
         delta_params = [t - b for t, b in zip(trained, self._base_params)]
         params = compress_topk(delta_params, optimal_r)
         actual_bytes = compressed_size_bytes(params) if optimal_r < 1.0 else msz
+
+        delta_norm  = float(np.sqrt(sum(np.sum(d**2) for d in delta_params)))
+        base_norm   = float(np.sqrt(sum(np.sum(b**2) for b in self._base_params)))
+        trained_norm = float(np.sqrt(sum(np.sum(t**2) for t in trained)))
+        _log.info(
+            "[R%d cid=%s] r=%.2f  base_norm=%.4f  trained_norm=%.4f  delta_norm=%.4f  bytes=%d",
+            server_rnd, self.client_id, optimal_r, base_norm, trained_norm, delta_norm, actual_bytes,
+        )
+        if delta_norm < 1e-6:
+            _log.warning(
+                "[R%d cid=%s] delta_norm=%.2e near zero — training may not have updated the model",
+                server_rnd, self.client_id, delta_norm,
+            )
         extra = {
             "compression_ratio_applied": float(optimal_r),
             "local_epochs": float(tau),
