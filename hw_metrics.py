@@ -110,17 +110,18 @@ def _setup_logging(device: str) -> logging.Logger:
 
     root = logging.getLogger("flash")
     root.setLevel(logging.DEBUG)
-    root.addFilter(device_filter)
 
     if not root.handlers:
         fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
+        fh.addFilter(device_filter)
         root.addHandler(fh)
 
         sh = logging.StreamHandler()
         sh.setLevel(logging.WARNING)
         sh.setFormatter(fmt)
+        sh.addFilter(device_filter)
         root.addHandler(sh)
 
     # Optional: stream to central log server on Chameleon
@@ -132,6 +133,7 @@ def _setup_logging(device: str) -> logging.Logger:
         try:
             socket_handler = logging.handlers.SocketHandler(host, port)
             socket_handler.setLevel(logging.DEBUG)
+            socket_handler.addFilter(device_filter)
             root.addHandler(socket_handler)
             root.info("Log streaming enabled -> %s:%d", host, port)
         except Exception as exc:
