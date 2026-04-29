@@ -287,18 +287,41 @@ class _JetsonCollector:
                 m[f"power_{safe}_mw"] = float(val_mw)
                 rail_total += val_mw
         if rail_total == 0:
-            # Xavier NX/AGX exposes INA3221 via hwmon on newer kernels
+            # Xavier NX/AGX/Nano expose INA3221 via hwmon on newer kernels.
+            # The ina3221 hwmon driver uses curr{N}_input (mA) + in{N}_input (mV),
+            # NOT power*_input files — power must be computed as I * V.
             for sensor in Path("/sys/class/hwmon").glob("hwmon*"):
                 name_file = sensor / "name"
                 if not name_file.exists():
                     continue
                 if "ina3221" not in name_file.read_text().strip().lower():
                     continue
-                for pfile in sensor.glob("power*_input"):
-                    val_mw = _read(str(pfile), 0.0) / 1000.0  # µW -> mW
-                    rid = re.search(r"\d+", pfile.name)
-                    m[f"power_hwmon_rail{rid.group() if rid else ''}_mw"] = val_mw
-                    rail_total += val_mw
+                channel_powers: Dict[int, float] = {}
+                main_rail_ch: Optional[int] = None
+                for ch in range(1, 5):
+                    curr_file = sensor / f"curr{ch}_input"
+                    volt_file = sensor / f"in{ch}_input"
+                    if not curr_file.exists() or not volt_file.exists():
+                        continue
+                    curr_ma = _read(str(curr_file), 0.0)
+                    volt_mv = _read(str(volt_file), 0.0)
+                    if curr_ma <= 0 or volt_mv <= 0:
+                        continue
+                    power_mw = curr_ma * volt_mv / 1000.0
+                    channel_powers[ch] = power_mw
+                    label_file = sensor / f"in{ch}_label"
+                    if label_file.exists():
+                        label = label_file.read_text().strip().upper()
+                        if any(x in label for x in ("VDD_IN", "5V_IN", "TOTAL", "POM_5V_IN")):
+                            main_rail_ch = ch
+                if channel_powers:
+                    if main_rail_ch and main_rail_ch in channel_powers:
+                        rail_total = channel_powers[main_rail_ch]
+                    else:
+                        # Channel 1 = main board input on all known Jetson INA3221 configs
+                        rail_total = channel_powers.get(1, max(channel_powers.values()))
+                    for ch, pw in channel_powers.items():
+                        m[f"power_hwmon_ch{ch}_mw"] = pw
         if rail_total > 0:
             m["power_total_soc_mw"] = rail_total
 
@@ -389,6 +412,8 @@ class _ChameleonCollector:
         self._prev_rapl_uj: Dict[str, float] = {}
         self._prev_ts: float = 0.0
         self._logged = False
+        # Pre-warm: seed RAPL baseline so the first real poll has a valid delta.
+        self.snapshot()
 
     def snapshot(self) -> Dict[str, float]:
         m = _psutil_common()
@@ -496,6 +521,7 @@ class _ChameleonCollector:
         if _NVML_OK:
             try:
                 n = pynvml.nvmlDeviceGetCount()
+                gpu_total_mw = 0.0
                 for idx in range(n):
                     h = pynvml.nvmlDeviceGetHandleByIndex(idx)
                     util = pynvml.nvmlDeviceGetUtilizationRates(h)
@@ -504,12 +530,16 @@ class _ChameleonCollector:
                     if isinstance(name, bytes):
                         name = name.decode()
                     sn = re.sub(r"[^a-zA-Z0-9]", "_", name).lower()[:20]
+                    pw = float(pynvml.nvmlDeviceGetPowerUsage(h))
                     m[f"gpu{idx}_{sn}_util_pct"] = float(util.gpu)
                     m[f"gpu{idx}_{sn}_mem_used_mb"] = mem.used / 1e6
-                    m[f"gpu{idx}_{sn}_power_mw"] = float(pynvml.nvmlDeviceGetPowerUsage(h))
+                    m[f"gpu{idx}_{sn}_power_mw"] = pw
                     m[f"gpu{idx}_{sn}_temp_celsius"] = float(
                         pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
                     )
+                    gpu_total_mw += pw
+                # Explicit key so EnergyAccumulator's gpu_power_nvml_mw check fires.
+                m["gpu_power_nvml_mw"] = gpu_total_mw
             except Exception:
                 pass
 
