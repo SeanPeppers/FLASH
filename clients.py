@@ -172,8 +172,8 @@ def load_data(
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,)),
         ])
-        train_full = datasets.MNIST(DATA_DIR, train=True, download=False, transform=transform)
-        test_full  = datasets.MNIST(DATA_DIR, train=False, download=False, transform=transform)
+        train_full = datasets.MNIST(DATA_DIR, train=True, download=True, transform=transform)
+        test_full  = datasets.MNIST(DATA_DIR, train=False, download=True, transform=transform)
     except Exception as e:
         print(
             f"[Client {cid}] ERROR loading MNIST from {DATA_DIR}: {e}\n"
