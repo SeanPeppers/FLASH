@@ -396,12 +396,26 @@ class _JetsonCollector:
                 except Exception:
                     pass
 
-        # DLA (Xavier only)
-        if DEVICE == "jetson_xavier":
-            teg = _run_cached("tegrastats --interval 1 --count 1")
+        # tegrastats — DLA util + INA3221 power rails (Xavier/Nano)
+        # tegrastats reads the same INA3221 via NVIDIA's driver, bypassing hwmon.
+        # Format: ... VDD_IN 5000mW/5000mW VDD_CPU_GPU_CV 1234mW/1234mW ...
+        teg = _run_cached("tegrastats --interval 1 --count 1")
+        if teg:
             dla = re.search(r"DLA_\d+:\s+(\d+)%", teg)
             if dla:
                 m["dla_util_pct"] = float(dla.group(1))
+            # Parse all rail_name current_mW/avg_mW pairs
+            teg_total = 0.0
+            for rail, cur_mw in re.findall(r"(\w+)\s+(\d+)mW/\d+mW", teg):
+                safe = rail.lower()
+                m[f"power_teg_{safe}_mw"] = float(cur_mw)
+                if rail == "VDD_IN":
+                    teg_total = float(cur_mw)
+            if teg_total == 0.0:
+                # VDD_IN not present on some Nano configs — sum all rails
+                teg_total = sum(v for k, v in m.items() if k.startswith("power_teg_"))
+            if teg_total > 0 and "power_total_soc_mw" not in m:
+                m["power_total_soc_mw"] = teg_total
 
         # NVML
         if _NVML_OK:
