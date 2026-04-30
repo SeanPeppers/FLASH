@@ -201,6 +201,13 @@ def _psutil_common() -> Dict[str, float]:
 
 
 # ── Pi 5 collector ─────────────────────────────────────────────────────────────
+# CPU utilization power model constants — calibrate these offline with a USB
+# power meter: measure wall power at idle and at 100% CPU (e.g. `stress -c 4`).
+# Current defaults are typical Pi 5 values; update before final paper run.
+_PI5_IDLE_MW = 3200.0   # ~3.2 W at idle
+_PI5_MAX_MW  = 7500.0   # ~7.5 W at 100% CPU load
+
+
 class _Pi5Collector:
     def __init__(self):
         self._logged = False
@@ -249,6 +256,14 @@ class _Pi5Collector:
                 hwmon_total_mw += val_mw
         if hwmon_total_mw > 0:
             m["power_total_soc_mw"] = hwmon_total_mw
+        else:
+            # No hardware power sensor — use CPU utilization linear power model.
+            # P = P_idle + (P_max - P_idle) * cpu_fraction
+            # Calibrate _PI5_IDLE_MW / _PI5_MAX_MW offline before paper runs.
+            cpu_frac = m.get("cpu_util_pct", 0.0) / 100.0
+            model_mw = _PI5_IDLE_MW + (_PI5_MAX_MW - _PI5_IDLE_MW) * cpu_frac
+            m["power_model_cpu_mw"] = model_mw
+            m["power_total_soc_mw"] = model_mw
 
         if not self._logged:
             self._logged = True
@@ -258,7 +273,8 @@ class _Pi5Collector:
                 _hw_log.info("[Pi5] hwmon rails found: %s -> power_total_soc_mw=%.1f mW",
                              detail_str, m.get("power_total_soc_mw", 0.0))
             else:
-                _hw_log.warning("[Pi5] NO hwmon power rails found — energy will read 0.0 J")
+                _hw_log.info("[Pi5] No hwmon power sensor — using CPU utilization model "
+                             "(idle=%.0f mW, max=%.0f mW)", _PI5_IDLE_MW, _PI5_MAX_MW)
 
         return m
 
