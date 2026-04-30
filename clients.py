@@ -377,7 +377,7 @@ class BaseLeafClient(fl.client.NumPyClient):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = SimpleNet().to(self.device)
         self.criterion = nn.CrossEntropyLoss()
-        self.base_lr = 0.01
+        self.base_lr = 0.001
         self.train_loader, self.test_loader = load_data(self.cid_int, data_workers, num_total_clients)
         # GradScaler for FP16 mixed-precision training on CUDA devices (no-op on CPU)
         self.scaler: Optional[torch.cuda.amp.GradScaler] = (
@@ -421,9 +421,9 @@ class FLASHClient(BaseLeafClient):
         num_rounds = int(config.get("num_rounds", 60))
         # Clamp epochs to MAX_LOCAL_EPOCHS so Pi 5 doesn't run for hours
         tau = min(int(config.get("suggested_tau", 2)), MAX_LOCAL_EPOCHS)
-        # Cosine annealing decay: lr scales from ~base down to ~10% of base
+        # Cosine annealing decay: lr scales from base down to ~10% of base
         decay = max(0.5 * (1.0 + math.cos(math.pi * server_rnd / num_rounds)), 0.1)
-        eta = self.base_lr * (bar_tau_r / max(tau, 1)) * decay
+        eta = self.base_lr * decay
         optimizer = optim.Adam(self.model.parameters(), lr=eta)
 
         hw_before = snapshot()
@@ -482,7 +482,7 @@ class FLAREClient(BaseLeafClient):
         bar_tau_r  = float(config.get("bar_tau_r", TARGET_TAU))
         server_rnd = int(config.get("server_round", 1))
         tau = min(int(config.get("suggested_tau", 2)), MAX_LOCAL_EPOCHS)
-        eta = self.base_lr * (bar_tau_r / max(tau, 1))
+        eta = self.base_lr
         optimizer = optim.Adam(self.model.parameters(), lr=eta)
 
         hw_before = snapshot()
