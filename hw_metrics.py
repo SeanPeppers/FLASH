@@ -183,19 +183,17 @@ _teg_cache: tuple = ("", 0.0)
 
 
 def _tegrastats_once() -> str:
-    """Start tegrastats, read one output line, kill it. Cached for _CMD_TTL seconds."""
+    """Return one line of tegrastats output. Cached for _CMD_TTL seconds.
+    Pipes through head -1 so SIGPIPE forces tegrastats to flush and exit."""
     global _teg_cache
     val, ts = _teg_cache
     if time.monotonic() - ts < _CMD_TTL:
         return val
     try:
-        proc = subprocess.Popen(
-            ["tegrastats", "--interval", "500"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-        )
-        val = proc.stdout.readline().decode("utf-8", errors="ignore").strip()
-        proc.kill()
-        proc.wait(timeout=2)
+        val = subprocess.check_output(
+            "tegrastats --interval 500 | head -1",
+            shell=True, stderr=subprocess.DEVNULL, timeout=4
+        ).decode("utf-8", errors="ignore").strip()
     except Exception:
         val = ""
     _teg_cache = (val, time.monotonic())
