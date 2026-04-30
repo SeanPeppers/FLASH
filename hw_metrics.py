@@ -178,6 +178,30 @@ def _run_cached(cmd: str) -> str:
     return val
 
 
+# tegrastats cache (separate: uses Popen+readline, no --count flag support)
+_teg_cache: tuple = ("", 0.0)
+
+
+def _tegrastats_once() -> str:
+    """Start tegrastats, read one output line, kill it. Cached for _CMD_TTL seconds."""
+    global _teg_cache
+    val, ts = _teg_cache
+    if time.monotonic() - ts < _CMD_TTL:
+        return val
+    try:
+        proc = subprocess.Popen(
+            ["tegrastats", "--interval", "500"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        val = proc.stdout.readline().decode("utf-8", errors="ignore").strip()
+        proc.kill()
+        proc.wait(timeout=2)
+    except Exception:
+        val = ""
+    _teg_cache = (val, time.monotonic())
+    return val
+
+
 # ── Common psutil block ────────────────────────────────────────────────────────
 def _psutil_common() -> Dict[str, float]:
     m: Dict[str, float] = {}
@@ -344,7 +368,7 @@ class _JetsonCollector:
         # tegrastats — INA3221 power rails via NVIDIA's driver (bypasses hwmon).
         # Parsed here, before the logging block, so power keys are visible to it.
         # Format: ... VDD_IN 5000mW/5000mW VDD_CPU_GPU_CV 1234mW/1234mW ...
-        teg = _run_cached("tegrastats --interval 1 --count 1")
+        teg = _tegrastats_once()
         if teg and "power_total_soc_mw" not in m:
             teg_total = 0.0
             for rail, cur_mw in re.findall(r"(\w+)\s+(\d+)mW/\d+mW", teg):
@@ -414,8 +438,8 @@ class _JetsonCollector:
                 except Exception:
                     pass
 
-        # DLA util (Xavier only) — tegrastats already called above for power
-        if teg and DEVICE == "jetson_xavier":
+        # DLA util (Xavier only) — reuse cached tegrastats output from above
+        if DEVICE == "jetson_xavier" and teg:
             dla = re.search(r"DLA_\d+:\s+(\d+)%", teg)
             if dla:
                 m["dla_util_pct"] = float(dla.group(1))
