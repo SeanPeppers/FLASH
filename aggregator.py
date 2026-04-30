@@ -55,7 +55,7 @@ _log = logging.getLogger("flash.aggregator")
 from clients import (
     SimpleNet, get_parameters, set_parameters, model_size_bytes,
     TARGET_TAU, COMPRESSION_OPTIONS, MAX_LOCAL_EPOCHS,
-    decompress_topk,
+    decompress_topk, evaluate_model, DATA_DIR,
 )
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -321,7 +321,26 @@ class AggregatorClient(fl.client.NumPyClient):
         self.num_leaf_clients = num_leaf_clients
         self.model = SimpleNet()
         self._round = 0
+        self.criterion = torch.nn.CrossEntropyLoss()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.test_loader = self._load_mnist_test()
         print(f"[Aggregator] Xavier ({hw_metrics.DEVICE})  strategy={inner_strategy.strategy_name}")
+
+    def _load_mnist_test(self):
+        try:
+            from torchvision import datasets, transforms
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.1307,), (0.3081,)),
+            ])
+            test_ds = datasets.MNIST(DATA_DIR, train=False, download=True, transform=transform)
+            loader = torch.utils.data.DataLoader(test_ds, batch_size=256, shuffle=False)
+            print(f"[Aggregator] Loaded MNIST test set: {len(test_ds)} samples for evaluation")
+            return loader
+        except Exception as e:
+            print(f"[Aggregator] WARNING: Could not load MNIST test set ({e}). Eval will use dummy data.")
+            return None
 
     def get_parameters(self, config):
         return get_parameters(self.model)
@@ -393,17 +412,20 @@ class AggregatorClient(fl.client.NumPyClient):
 
     def evaluate(self, parameters, config):
         set_parameters(self.model, parameters)
-        # Run a quick forward pass on dummy data for the eval loss
-        # (Replace with a real validation set if you have one on the Xavier)
-        self.model.eval()
-        with torch.no_grad():
-            dummy_x = torch.randn(64, 1, 28, 28)
-            dummy_y = torch.randint(0, 10, (64,))
-            logits = self.model(dummy_x)
-            loss = torch.nn.functional.cross_entropy(logits, dummy_y).item()
-            acc = (logits.argmax(1) == dummy_y).float().mean().item()
+        if self.test_loader is not None:
+            loss, acc = evaluate_model(self.model, self.test_loader, self.criterion, self.device)
+            num_samples = len(self.test_loader.dataset)
+        else:
+            self.model.eval()
+            with torch.no_grad():
+                dummy_x = torch.randn(64, 1, 28, 28).to(self.device)
+                dummy_y = torch.randint(0, 10, (64,)).to(self.device)
+                logits = self.model(dummy_x)
+                loss = torch.nn.functional.cross_entropy(logits, dummy_y).item()
+                acc = (logits.argmax(1) == dummy_y).float().mean().item()
+            num_samples = 64
         hw = snapshot()
-        return float(loss), 64, {
+        return float(loss), num_samples, {
             "loss": float(loss),
             "accuracy": float(acc),
             "agg_hw_cpu_util_pct":       float(hw.get("cpu_util_pct", 0.0)),
