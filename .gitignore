@@ -30,3 +30,20 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Paper (LaTeX source and build artifacts)
+main.tex
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
+*.fdb_latexmk
+
+# Serena MCP tool
+.serena/

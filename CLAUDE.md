@@ -27,6 +27,7 @@ Hardware telemetry for all tiers is in `hw_metrics.py`.
 | `hw_metrics.py` | Hardware-aware metrics collection for all tiers | 1,440 |
 | `log_server.py` | Central log aggregator; run on Chameleon before experiment | — |
 | `verify_flash.py` | Local pipeline verification (compression + aggregation + training) | — |
+| `plot_results.py` | Research-quality figure generation from CSVs; outputs to `fl_results_hfl/figures/` | — |
 | `fl_results_hfl/` | Output directory for all CSV results and per-device debug logs | — |
 
 ---
@@ -132,6 +133,34 @@ Metric prefixes: leaf metrics → `leaf_`, aggregator metrics → `agg_`.
 6. Top-k sparsification ablation study (compare payload size vs accuracy)
 7. Autonomous adaptive compression (feedback loop on real-time jitter)
 8. Online cost model calibration (dynamic `k_comp`/`k_comm` weighting)
+
+---
+
+## Gemini Sub-Agent Orchestration
+
+Claude is the **orchestrator** — strategy, reasoning, architecture decisions.  
+Gemini (via `/gemini-cli`) is the **sub-agent** for high-volume or data-heavy tasks.
+
+**Delegate to Gemini when the task involves:**
+- Data formatting: converting raw output into JSON / CSV / Markdown tables
+- Summarization: condensing long transcripts, logs, or docs into bullets
+- Drafting: repetitive boilerplate, templates, docstrings
+- Cleanup: grammar, spelling, broken syntax, column-renaming passes
+
+**Response format when delegating:**
+
+```
+### Claude's Strategy
+[High-level reasoning / complex logic applied]
+
+### Task for Gemini Sub-Agent
+Objective: [Precise instruction]
+Input Data: [Exact data to process]
+Desired Output: [Format, length, columns, etc.]
+
+### Final Integration
+[Where Gemini's output slots in, or a placeholder]
+```
 
 ---
 

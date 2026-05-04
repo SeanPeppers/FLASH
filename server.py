@@ -147,7 +147,6 @@ class FLASHGlobalStrategy(FedAvg):
     def __init__(self, bar_tau_r: float, t_thr: float,
                  compression_options: Set[float],
                  num_rounds: int = NUM_ROUNDS,
-                 patience: int = 10, min_delta: float = 1e-4,
                  fixed_r: Optional[float] = None,
                  **kwargs):
         super().__init__(**kwargs)
@@ -157,16 +156,6 @@ class FLASHGlobalStrategy(FedAvg):
         self._num_rounds = num_rounds
         self._fixed_r: Optional[float] = fixed_r
         self._agg_history: Dict[str, Dict] = {}
-
-        # Early stopping state
-        self._patience = patience
-        self._min_delta = min_delta
-        self._best_loss: float = float("inf")
-        self._patience_counter: int = 0
-        self._best_round: int = 0
-        self._best_params: Optional[Parameters] = None
-        self._current_params: Optional[Parameters] = None
-        self._early_stopped: bool = False
 
     def configure_fit(self, server_round, parameters, client_manager):
         aggs = client_manager.sample(
@@ -197,36 +186,7 @@ class FLASHGlobalStrategy(FedAvg):
     def aggregate_fit(self, server_round, results, failures):
         for agg, fit_res in results:
             self._agg_history[agg.cid] = fit_res.metrics
-        aggregated = super().aggregate_fit(server_round, results, failures)
-        # Snapshot the latest aggregated params so aggregate_evaluate can save
-        # them as the best checkpoint if this round's eval loss is an improvement.
-        if aggregated and aggregated[0] is not None:
-            self._current_params = aggregated[0]
-        # After early stopping, freeze the model at the best checkpoint to
-        # prevent further degradation while the remaining rounds still run.
-        if self._early_stopped and self._best_params is not None:
-            return (self._best_params, aggregated[1] if aggregated else {})
-        return aggregated
-
-    def aggregate_evaluate(self, server_round, results, failures):
-        agg = super().aggregate_evaluate(server_round, results, failures)
-        if agg and agg[0] is not None:
-            loss = float(agg[0])
-            if loss < self._best_loss - self._min_delta:
-                self._best_loss = loss
-                self._patience_counter = 0
-                self._best_round = server_round
-                self._best_params = self._current_params
-            else:
-                self._patience_counter += 1
-                if self._patience_counter >= self._patience and not self._early_stopped:
-                    self._early_stopped = True
-                    print(
-                        f"[EarlyStopping] Patience {self._patience} exceeded at "
-                        f"round {server_round}. Best loss {self._best_loss:.4f} at "
-                        f"round {self._best_round}. Freezing model at best checkpoint."
-                    )
-        return agg
+        return super().aggregate_fit(server_round, results, failures)
 
 
 # -- FLARE global strategy ------------------------------------------------------
@@ -388,6 +348,8 @@ if __name__ == "__main__":
                         help="Number of mid-tier aggregators (default: 5)")
     parser.add_argument("--no-wait",     action="store_true",
                         help="Don't prompt between experiments (use when scripting)")
+    parser.add_argument("--between-wait", type=int, default=600,
+                        help="Seconds to wait between experiments when --no-wait is set (default: 600)")
     parser.add_argument("--fixed-r",     type=float, default=None,
                         help="Force a fixed compression ratio hint for ablation study "
                              "(e.g. 0.25, 0.5, 0.75, 1.0). Passed to aggregators via config.")
@@ -446,8 +408,9 @@ if __name__ == "__main__":
         if not args.no_wait:
             input("  Press ENTER when aggregator + clients are running ...")
         elif i > 0:
-            print("  Waiting 20s for aggregator + clients to restart ...")
-            time.sleep(20)
+            wait = args.between_wait
+            print(f"  Waiting {wait}s for aggregator + clients to restart ...")
+            time.sleep(wait)
 
         strategy = factories[name]()
         hw_logger = RoundHWLogger(strategy, output_dir, name)

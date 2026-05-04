@@ -186,39 +186,28 @@ class _InnerStrategy(FedAvg):
         return out
 
     def _pick_r(self, cid: str) -> float:
-        # Task 6: ablation mode — bypass all adaptive logic
+        # Ablation mode — bypass all adaptive logic
         if self.fixed_r is not None:
             return self.fixed_r
 
-        if cid not in self._leaf_history:
-            return 1.0
-        m = self._leaf_history[cid]
-        fit_time = m.get("fit_wall_time_s", 0.0)
-
-        # Task 7: compute jitter-adjusted latency threshold.
-        # When recent fit times are highly variable, reduce the effective threshold
-        # so we compress more aggressively to stabilise round-trip times.
+        # Not enough history yet — send full model
         hist = self._latency_history.get(cid, [])
-        if len(hist) >= 3:
-            jitter = float(np.std(hist[-self._jitter_window:]))
-            jitter_norm = min(jitter / max(self.t_thr, 1e-6), 1.0)
-            effective_thr = self.t_thr * (1.0 - 0.5 * jitter_norm)
+        if len(hist) < 3:
+            return 1.0
+
+        # Jitter = std-dev of recent fit_wall_time_s values.
+        # High jitter means the leaf is under variable load or the link is
+        # unstable — compress more aggressively to avoid straggler rounds.
+        jitter = float(np.std(hist[-self._jitter_window:]))
+
+        if jitter < 1.0:
+            return 1.0
+        elif jitter < 2.0:
+            return 0.75
+        elif jitter < 3.5:
+            return 0.5
         else:
-            effective_thr = self.t_thr
-
-        if fit_time > effective_thr:
-            candidates = [r for r in self.compression_options if r < 1.0]
-            return candidates[0] if candidates else 0.25
-
-        # Analytic cost-model fallback
-        f = m.get("comp_capacity_proxy", 2.0)
-        r_prev = m.get("compression_ratio_applied", 1.0)
-        S = m.get("data_transfer_size_bytes", 1e5) / r_prev if r_prev > 0 else 1e5
-        T_comp = self.k_comp * self.bar_tau_r / max(f, 1e-6)
-        for r in self.compression_options:
-            if T_comp + self.k_comm * r * S <= effective_thr:
-                return r
-        return min(self.compression_options)
+            return 0.25
 
     def aggregate_fit(self, server_round, results, failures):
         # Decompress delta and reconstruct full params before FedAvg averages them.
