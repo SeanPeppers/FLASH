@@ -438,6 +438,8 @@ if __name__ == "__main__":
                              "(e.g. 0.25, 0.5, 0.75, 1.0). Bypasses adaptive logic.")
     parser.add_argument("--leaf-clients", type=int, default=NUM_LEAF_CLIENTS,
                         help="Number of leaf clients connecting to this aggregator (default: 20)")
+    parser.add_argument("--between-wait", type=int, default=600,
+                        help="Seconds to wait between strategies when running --strategy all (default: 600)")
     args = parser.parse_args()
 
     inner_addr = f"0.0.0.0:{args.agg_port}"
@@ -509,5 +511,9 @@ if __name__ == "__main__":
         # Wait for inner server thread to finish
         inner_thread.join(timeout=30)
         print(f"[Aggregator] {strategy_name} complete.")
+
+        if strategy_name != strategies[-1]:
+            print(f"[Aggregator] Waiting {args.between_wait}s for server to restart next experiment ...")
+            time.sleep(args.between_wait)
 
     print("[Aggregator] All strategies done.")
