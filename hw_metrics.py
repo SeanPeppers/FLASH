@@ -512,34 +512,6 @@ class _ChameleonCollector:
         if ipmi_m:
             m["ipmi_system_power_w"] = float(ipmi_m.group(1))
 
-        if not self._logged:
-            self._logged = True
-            rapl_files = list(self._RAPL.rglob("energy_uj")) if self._RAPL.exists() else []
-            rapl_vals = {str(f): _read(str(f), -1.0) for f in rapl_files}
-            readable = {k: v for k, v in rapl_vals.items() if v >= 0}
-            unreadable = [k for k, v in rapl_vals.items() if v < 0]
-            _hw_log.info("[Chameleon] RAPL path exists=%s  files_found=%d  readable=%d  unreadable=%d",
-                         self._RAPL.exists(), len(rapl_files), len(readable), len(unreadable))
-            if unreadable:
-                _hw_log.warning("[Chameleon] RAPL files permission-denied (run with sudo?): %s",
-                                unreadable[:3])
-            if readable:
-                sample = list(readable.items())[:2]
-                _hw_log.info("[Chameleon] RAPL sample values: %s",
-                             "  ".join(f"{Path(k).parent.name}={v:.0f}uJ" for k, v in sample))
-            else:
-                _hw_log.warning("[Chameleon] RAPL returned all zeros/unreadable — will fall back to GPU power")
-            if "ipmi_system_power_w" in m:
-                _hw_log.info("[Chameleon] IPMI available: %.1f W", m["ipmi_system_power_w"])
-            else:
-                _hw_log.warning("[Chameleon] IPMI unavailable — energy source will be RAPL or GPU NVML")
-            gpu_keys = [k for k in m if k.endswith("_power_mw")]
-            if gpu_keys:
-                gpu_str = "  ".join(f"{k}={m[k]:.0f}mW" for k in gpu_keys)
-                _hw_log.info("[Chameleon] GPU NVML power: %s", gpu_str)
-            else:
-                _hw_log.warning("[Chameleon] No GPU NVML power keys found")
-
         # CPU frequencies
         freqs = psutil.cpu_freq(percpu=True) or []
         if freqs:
@@ -597,6 +569,34 @@ class _ChameleonCollector:
                 m["gpu_power_nvml_mw"] = gpu_total_mw
             except Exception:
                 pass
+
+        if not self._logged:
+            self._logged = True
+            rapl_files = list(self._RAPL.rglob("energy_uj")) if self._RAPL.exists() else []
+            rapl_vals = {str(f): _read(str(f), -1.0) for f in rapl_files}
+            readable = {k: v for k, v in rapl_vals.items() if v >= 0}
+            unreadable = [k for k, v in rapl_vals.items() if v < 0]
+            _hw_log.info("[Chameleon] RAPL path exists=%s  files_found=%d  readable=%d  unreadable=%d",
+                         self._RAPL.exists(), len(rapl_files), len(readable), len(unreadable))
+            if unreadable:
+                _hw_log.warning("[Chameleon] RAPL files permission-denied (run with sudo?): %s",
+                                unreadable[:3])
+            if readable:
+                sample = list(readable.items())[:2]
+                _hw_log.info("[Chameleon] RAPL sample values: %s",
+                             "  ".join(f"{Path(k).parent.name}={v:.0f}uJ" for k, v in sample))
+            else:
+                _hw_log.warning("[Chameleon] RAPL returned all zeros/unreadable — will fall back to GPU power")
+            if "ipmi_system_power_w" in m:
+                _hw_log.info("[Chameleon] IPMI available: %.1f W", m["ipmi_system_power_w"])
+            else:
+                _hw_log.warning("[Chameleon] IPMI unavailable — energy source will be RAPL or GPU NVML")
+            gpu_keys = [k for k in m if k.endswith("_power_mw")]
+            if gpu_keys:
+                gpu_str = "  ".join(f"{k}={m[k]:.0f}mW" for k in gpu_keys)
+                _hw_log.info("[Chameleon] GPU NVML power: %s", gpu_str)
+            else:
+                _hw_log.warning("[Chameleon] No GPU NVML power keys found — server energy will read 0 J")
 
         return m
 
