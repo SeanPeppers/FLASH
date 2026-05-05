@@ -55,7 +55,7 @@ _log = logging.getLogger("flash.aggregator")
 from clients import (
     SimpleNet, get_parameters, set_parameters, model_size_bytes,
     TARGET_TAU, COMPRESSION_OPTIONS, MAX_LOCAL_EPOCHS,
-    decompress_topk, evaluate_model, DATA_DIR,
+    decompress_topk, compress_topk_adaptive, evaluate_model, DATA_DIR,
 )
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -270,6 +270,29 @@ class _InnerStrategy(FedAvg):
                 decompressed.append((client, fit_res))
             results = decompressed
 
+        # adaMC sends per-layer adaptive compressed full weights; decompress with bias correction
+        elif self.strategy_name == "adamc":
+            decompressed = []
+            for client, fit_res in results:
+                r = fit_res.metrics.get("compression_ratio_applied", 1.0)
+                if r < 1.0:
+                    raw = parameters_to_ndarrays(fit_res.parameters)
+                    full = decompress_topk(raw, bias_correct=True)
+                    fit_res = dataclasses.replace(fit_res, parameters=ndarrays_to_parameters(full))
+                decompressed.append((client, fit_res))
+            results = decompressed
+
+        # AnycostFL-inspired: weight FLASH client updates by compression fidelity.
+        # Clients that compressed less sent more faithful updates → higher aggregation weight.
+        if self.strategy_name == "flash":
+            weighted = []
+            for client, fit_res in results:
+                r = fit_res.metrics.get("compression_ratio_applied", 1.0)
+                adjusted_n = max(1, int(fit_res.num_examples * r))
+                fit_res = dataclasses.replace(fit_res, num_examples=adjusted_n)
+                weighted.append((client, fit_res))
+            results = weighted
+
         # Task 7: update per-client latency history for jitter detection
         for client, fit_res in results:
             fit_time = fit_res.metrics.get("fit_wall_time_s", 0.0)
@@ -466,7 +489,7 @@ class AggregatorClient(fl.client.NumPyClient):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HFL aggregator (Jetson Xavier)")
     parser.add_argument("--strategy", type=str, default="flash",
-                        choices=["flash", "fixedcompress", "fedavg", "all"])
+                        choices=["flash", "fixedcompress", "fedavg", "adamc", "all"])
     parser.add_argument("--agg-port", type=int, default=8081)
     parser.add_argument("--server-address", type=str, default="localhost:8080")
     parser.add_argument("--rounds", type=int, default=60,
@@ -488,7 +511,7 @@ if __name__ == "__main__":
         print(f"    {k}: {v:.4f}")
     print()
 
-    strategies = ["flash", "fixedcompress", "fedavg"] if args.strategy == "all" else [args.strategy]
+    strategies = ["flash", "fixedcompress", "fedavg", "adamc"] if args.strategy == "all" else [args.strategy]
 
     for strategy_name in strategies:
         print(f"\n[Aggregator] Starting strategy: {strategy_name}")

@@ -135,8 +135,12 @@ def compress_topk(params: List[np.ndarray], r: float) -> List[np.ndarray]:
     return packed
 
 
-def decompress_topk(packed_params: List[np.ndarray]) -> List[np.ndarray]:
-    """Reconstruct dense float32 arrays from packed pairs produced by compress_topk."""
+def decompress_topk(packed_params: List[np.ndarray], bias_correct: bool = False) -> List[np.ndarray]:
+    """Reconstruct dense float32 arrays from packed pairs produced by compress_topk.
+
+    bias_correct=True: scale surviving values by n/k to compensate for dropped entries
+    (adaMC-style truncation correction — preserves expected vector norm).
+    """
     result = []
     it = iter(packed_params)
     for meta in it:
@@ -146,10 +150,44 @@ def decompress_topk(packed_params: List[np.ndarray]) -> List[np.ndarray]:
         k = int(meta[1 + ndim])
         idx = meta[2 + ndim: 2 + ndim + k].astype(np.int32)
         vals = vals_fp16.astype(np.float32)
-        dense = np.zeros(int(np.prod(shape)), dtype=np.float32)
+        n = int(np.prod(shape))
+        dense = np.zeros(n, dtype=np.float32)
         dense[idx] = vals
+        if bias_correct and k < n:
+            dense *= (n / k)
         result.append(dense.reshape(shape))
     return result
+
+
+def compress_topk_adaptive(params: List[np.ndarray], global_r: float = 0.5) -> List[np.ndarray]:
+    """Per-layer adaptive top-k compression (adaMC-style).
+
+    Allocates the global compression budget (global_r × total_params) across layers
+    proportionally to each layer's L2 norm — layers with larger weights keep more values.
+    Uses the same packed format as compress_topk so decompress_topk handles it unchanged.
+    """
+    if global_r >= 1.0:
+        return params
+    norms = [float(np.linalg.norm(p)) + 1e-8 for p in params]
+    total_norm = sum(norms)
+    budget = max(len(params), int(sum(p.size for p in params) * global_r))
+    packed = []
+    for layer, norm in zip(params, norms):
+        shape = layer.shape
+        flat = layer.flatten().astype(np.float32)
+        n = len(flat)
+        k = max(1, min(n, int(budget * norm / total_norm)))
+        idx = np.argpartition(np.abs(flat), -k)[-k:]
+        idx = np.sort(idx)
+        vals = flat[idx]
+        meta = np.array(
+            [float(len(shape))] + [float(d) for d in shape] + [float(k)],
+            dtype=np.float32,
+        )
+        meta = np.concatenate([meta, idx.astype(np.float32)])
+        packed.append(meta)
+        packed.append(vals.astype(np.float16))
+    return packed
 
 
 def compressed_size_bytes(packed_params: List[np.ndarray]) -> float:
@@ -525,6 +563,53 @@ class FixedCompressClient(BaseLeafClient):
         return compressed, n, metrics
 
 
+# ── adaMC ──────────────────────────────────────────────────────────────────────
+# Simplified adaMC baseline: per-layer adaptive top-k on full weights at a global
+# budget of r=0.5. Budget is distributed proportional to layer L2 norm so
+# parameter-heavy layers retain more values. Decompressed with bias correction.
+ADAMC_GLOBAL_R = 0.5
+
+class adaMCClient(BaseLeafClient):
+    def fit(self, parameters, config: Dict) -> Tuple:
+        set_parameters(self.model, parameters)
+        server_rnd = int(config.get("server_round", 1))
+        tau = min(int(config.get("suggested_tau", 2)), MAX_LOCAL_EPOCHS)
+        eta = self.base_lr
+        optimizer = optim.Adam(self.model.parameters(), lr=eta)
+
+        hw_before = snapshot()
+        acc = EnergyAccumulator()
+        acc.start()
+        t0 = time.perf_counter()
+
+        per_epoch = [
+            train_one_epoch(self.model, self.train_loader, self.criterion, optimizer, self.device, self.scaler)
+            for _ in range(tau)
+        ]
+
+        training_time = time.perf_counter() - t0
+        energy_j = acc.stop_and_get_joules()
+        hw_after = snapshot()
+        msz = model_size_bytes(self.model)
+
+        trained_params = get_parameters(self.model)
+        compressed = compress_topk_adaptive(trained_params, ADAMC_GLOBAL_R)
+        actual_bytes = compressed_size_bytes(compressed)
+
+        extra = {
+            "compression_ratio_applied": ADAMC_GLOBAL_R,
+            "local_epochs": float(tau),
+            "learning_rate": float(eta),
+            "server_round": float(server_rnd),
+            "data_transfer_size_bytes": actual_bytes,
+            "model_size_bytes": msz,
+            "fit_wall_time_s": float(training_time),
+        }
+        metrics = build_metrics(hw_before, hw_after, per_epoch, training_time, energy_j, extra)
+        n = int(sum(e["epoch_samples"] for e in per_epoch)) or BATCH_SIZE
+        return compressed, n, metrics
+
+
 # ── FedAvg ─────────────────────────────────────────────────────────────────────
 class FedAvgClient(BaseLeafClient):
     def fit(self, parameters, config: Dict) -> Tuple:
@@ -561,7 +646,7 @@ class FedAvgClient(BaseLeafClient):
 
 
 # ── Client registry ────────────────────────────────────────────────────────────
-CLIENT_REGISTRY = {"flash": FLASHClient, "fixedcompress": FixedCompressClient, "fedavg": FedAvgClient}
+CLIENT_REGISTRY = {"flash": FLASHClient, "fixedcompress": FixedCompressClient, "fedavg": FedAvgClient, "adamc": adaMCClient}
 
 # ── Persistent reconnect loop ──────────────────────────────────────────────────
 def run_client_loop(client: fl.client.NumPyClient, agg_address: str,
@@ -603,7 +688,7 @@ if __name__ == "__main__":
     print(f"[Client {args.cid}] Hardware: {hw_metrics.DEVICE}")
 
     if args.strategy == "all":
-        for strategy_name in ["flash", "fixedcompress", "fedavg"]:
+        for strategy_name in ["flash", "fixedcompress", "fedavg", "adamc"]:
             print(f"[Client {args.cid}] Starting strategy: {strategy_name}")
             client = CLIENT_REGISTRY[strategy_name](args.cid, args.data_workers, args.num_clients)
             # Connect once for this experiment, retry on connection errors but

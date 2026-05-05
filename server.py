@@ -200,6 +200,18 @@ class FixedCompressGlobalStrategy(FedAvg):
         return [(agg, FitIns(parameters, cfg)) for agg in aggs]
 
 
+# -- adaMC global strategy ------------------------------------------------------
+# adaMC's adaptation logic lives in the aggregator/clients; server just relays rounds.
+class adaMCGlobalStrategy(FedAvg):
+    def configure_fit(self, server_round, parameters, client_manager):
+        aggs = client_manager.sample(
+            num_clients=self.min_fit_clients,
+            min_num_clients=self.min_fit_clients,
+        )
+        cfg = {"server_round": server_round, "bar_tau_r": TARGET_TAU}
+        return [(agg, FitIns(parameters, cfg)) for agg in aggs]
+
+
 # -- CSV / plot helpers ---------------------------------------------------------
 def save_csvs(history, name: str, output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -269,6 +281,7 @@ COLORS = {
     "FLASH (HFL)": "#e63946",
     "FixedCompress (HFL)": "#2a9d8f",
     "FedAvg (HFL)": "#457b9d",
+    "ADAMC (HFL)": "#f4a261",
 }
 
 
@@ -343,7 +356,7 @@ if __name__ == "__main__":
     parser.add_argument("--port",        type=int, default=8080)
     parser.add_argument("--output-dir",  type=str, default="./fl_results_hfl")
     parser.add_argument("--experiment",  type=str, default="all",
-                        choices=["flash", "fixedcompress", "fedavg", "all"])
+                        choices=["flash", "fixedcompress", "fedavg", "adamc", "all"])
     parser.add_argument("--aggregators",  type=int, default=NUM_AGGREGATORS,
                         help="Number of mid-tier aggregators (default: 5)")
     parser.add_argument("--no-wait",     action="store_true",
@@ -385,6 +398,7 @@ if __name__ == "__main__":
                       **common),
         "fixedcompress": lambda: FixedCompressGlobalStrategy(**common),
         "fedavg": lambda: FedAvg(**common),
+        "adamc":  lambda: adaMCGlobalStrategy(**common),
     }
 
     to_run = list(factories.keys()) if args.experiment == "all" else [args.experiment]
