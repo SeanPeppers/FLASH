@@ -448,6 +448,9 @@ class FLASHClient(BaseLeafClient):
     def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100):
         super().__init__(client_id, data_workers, num_total_clients)
         self._base_params: Optional[List[np.ndarray]] = None
+        # Error feedback buffer: accumulates values dropped by top-k each round
+        # and adds them to the next round's delta so nothing is permanently lost.
+        self._residual: Optional[List[np.ndarray]] = None
 
     def fit(self, parameters, config: Dict) -> Tuple:
         # Store the params received from the server so we can compute a delta
@@ -479,18 +482,35 @@ class FLASHClient(BaseLeafClient):
         hw_after = snapshot()
 
         msz = model_size_bytes(self.model)
-        # Compute delta and compress it — deltas are much sparser than raw weights
+        # Compute delta and apply error feedback before compressing.
         trained = [p.astype(np.float32) for p in get_parameters(self.model)]
         delta_params = [t - b for t, b in zip(trained, self._base_params)]
-        params = compress_topk(delta_params, optimal_r)
+
+        # Error feedback: add accumulated residual so values dropped in prior rounds
+        # are eventually transmitted. On r=1.0 warmup rounds, residual stays zero.
+        if self._residual is None:
+            self._residual = [np.zeros_like(d) for d in delta_params]
+        corrected = [d + e for d, e in zip(delta_params, self._residual)]
+
+        params = compress_topk(corrected, optimal_r)
         actual_bytes = compressed_size_bytes(params) if optimal_r < 1.0 else msz
 
-        delta_norm  = float(np.sqrt(sum(np.sum(d**2) for d in delta_params)))
-        base_norm   = float(np.sqrt(sum(np.sum(b**2) for b in self._base_params)))
-        trained_norm = float(np.sqrt(sum(np.sum(t**2) for t in trained)))
+        # Update residual = what we intended to send minus what we actually sent
+        if optimal_r < 1.0:
+            sent = decompress_topk(params)
+            self._residual = [c - s for c, s in zip(corrected, sent)]
+        else:
+            self._residual = [np.zeros_like(d) for d in delta_params]
+
+        delta_norm    = float(np.sqrt(sum(np.sum(d**2) for d in delta_params)))
+        residual_norm = float(np.sqrt(sum(np.sum(e**2) for e in self._residual)))
+        base_norm     = float(np.sqrt(sum(np.sum(b**2) for b in self._base_params)))
+        trained_norm  = float(np.sqrt(sum(np.sum(t**2) for t in trained)))
         _log.info(
-            "[R%d cid=%s] r=%.2f  base_norm=%.4f  trained_norm=%.4f  delta_norm=%.4f  bytes=%d",
-            server_rnd, self.client_id, optimal_r, base_norm, trained_norm, delta_norm, actual_bytes,
+            "[R%d cid=%s] r=%.2f  base_norm=%.4f  trained_norm=%.4f  "
+            "delta_norm=%.4f  residual_norm=%.4f  bytes=%d",
+            server_rnd, self.client_id, optimal_r, base_norm, trained_norm,
+            delta_norm, residual_norm, actual_bytes,
         )
         if delta_norm < 1e-6:
             _log.warning(
@@ -507,6 +527,7 @@ class FLASHClient(BaseLeafClient):
             "model_size_bytes": msz,
             "fit_wall_time_s": float(training_time),
             "comp_capacity_proxy": float(tau / max(training_time, 1e-6)),
+            "residual_norm": residual_norm,
         }
         metrics = build_metrics(hw_before, hw_after, per_epoch, training_time, energy_j, extra)
         n = int(sum(e["epoch_samples"] for e in per_epoch)) or BATCH_SIZE
