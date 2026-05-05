@@ -138,6 +138,11 @@ class _InnerStrategy(FedAvg):
         self._latency_history: Dict[str, List[float]] = {}
         self._jitter_window: int = 5
 
+        # Adaptive epoch scheduling — track recent training loss to detect plateau
+        self._loss_history: List[float] = []
+        self._tau_window: int = 5
+        self._loss_plateau_threshold: float = 0.002
+
         # Thread-safe handshake between inner server and aggregator client
         self._round_ready   = threading.Event()   # aggregator signals: new params ready
         self._round_done    = threading.Event()   # inner server signals: round complete
@@ -180,7 +185,7 @@ class _InnerStrategy(FedAvg):
                 "server_round": self._global_round,
                 "bar_tau_r": self.bar_tau_r,
                 "optimal_r_star": r_star,
-                "suggested_tau": min(int(round(self.bar_tau_r)), MAX_LOCAL_EPOCHS),
+                "suggested_tau": self._pick_tau() if self.strategy_name == "flash" else MAX_LOCAL_EPOCHS,
             }
             out.append((c, FitIns(params_to_send, cfg)))
         return out
@@ -190,24 +195,35 @@ class _InnerStrategy(FedAvg):
         if self.fixed_r is not None:
             return self.fixed_r
 
-        # Not enough history yet — send full model
+        # Warmup: send full model for first 2 rounds to build jitter history
         hist = self._latency_history.get(cid, [])
-        if len(hist) < 3:
+        if len(hist) < 2:
             return 1.0
 
         # Jitter = std-dev of recent fit_wall_time_s values.
-        # High jitter means the leaf is under variable load or the link is
-        # unstable — compress more aggressively to avoid straggler rounds.
+        # High jitter means unstable load/link — compress more aggressively.
+        # Thresholds are tuned for Pi5/Nano edge devices (~140s rounds):
+        #   < 0.5s std  → very stable → light compression
+        #   < 2.0s std  → normal      → half payload
+        #   >= 2.0s std → unstable    → aggressive compression
         jitter = float(np.std(hist[-self._jitter_window:]))
 
-        if jitter < 1.0:
-            return 1.0
-        elif jitter < 2.0:
+        if jitter < 0.5:
             return 0.75
-        elif jitter < 3.5:
+        elif jitter < 2.0:
             return 0.5
         else:
             return 0.25
+
+    def _pick_tau(self) -> int:
+        """Return suggested local epochs: drop to 1 when loss has plateaued."""
+        if len(self._loss_history) < self._tau_window:
+            return MAX_LOCAL_EPOCHS
+        recent = self._loss_history[-self._tau_window:]
+        # Improvement = drop in loss over the window; < threshold means plateau
+        if (recent[0] - recent[-1]) < self._loss_plateau_threshold:
+            return 1
+        return MAX_LOCAL_EPOCHS
 
     def aggregate_fit(self, server_round, results, failures):
         # Decompress delta and reconstruct full params before FedAvg averages them.
@@ -249,6 +265,16 @@ class _InnerStrategy(FedAvg):
             hist.append(fit_time)
             if len(hist) > self._jitter_window * 2:
                 self._latency_history[client.cid] = hist[-self._jitter_window:]
+
+        # Adaptive epoch scheduling: track mean training loss for plateau detection
+        if self.strategy_name == "flash":
+            loss_vals = [
+                fit_res.metrics["train_loss_mean"]
+                for _, fit_res in results
+                if "train_loss_mean" in fit_res.metrics
+            ]
+            if loss_vals:
+                self._loss_history.append(float(np.mean(loss_vals)))
 
         # Task 8: EMA cost model calibration with outlier rejection (FLASH only)
         if self.strategy_name == "flash":
