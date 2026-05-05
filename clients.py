@@ -475,8 +475,13 @@ class FLASHClient(BaseLeafClient):
         return params, n, metrics
 
 
-# ── FLARE ──────────────────────────────────────────────────────────────────────
-class FLAREClient(BaseLeafClient):
+# ── FixedCompress ───────────────────────────────────────────────────────────────
+# Fixed top-k compression at r=0.75 — sends compressed full weights every round.
+# Serves as a meaningful middle baseline between FedAvg (no compression) and
+# FLASH (adaptive compression + delta encoding).
+FIXED_COMPRESS_R = 0.75
+
+class FixedCompressClient(BaseLeafClient):
     def fit(self, parameters, config: Dict) -> Tuple:
         set_parameters(self.model, parameters)
         bar_tau_r  = float(config.get("bar_tau_r", TARGET_TAU))
@@ -499,19 +504,25 @@ class FLAREClient(BaseLeafClient):
         energy_j = acc.stop_and_get_joules()
         hw_after = snapshot()
         msz = model_size_bytes(self.model)
+
+        # Apply fixed top-k compression on full weights (no delta encoding)
+        trained_params = get_parameters(self.model)
+        compressed = compress_topk(trained_params, FIXED_COMPRESS_R)
+        actual_bytes = compressed_size_bytes(compressed)
+
         extra = {
-            "compression_ratio_applied": 1.0,
+            "compression_ratio_applied": FIXED_COMPRESS_R,
             "local_epochs": float(tau),
             "learning_rate": float(eta),
             "bar_tau_r": float(bar_tau_r),
             "server_round": float(server_rnd),
-            "data_transfer_size_bytes": msz,
+            "data_transfer_size_bytes": actual_bytes,
             "model_size_bytes": msz,
             "fit_wall_time_s": float(training_time),
         }
         metrics = build_metrics(hw_before, hw_after, per_epoch, training_time, energy_j, extra)
         n = int(sum(e["epoch_samples"] for e in per_epoch)) or BATCH_SIZE
-        return get_parameters(self.model), n, metrics
+        return compressed, n, metrics
 
 
 # ── FedAvg ─────────────────────────────────────────────────────────────────────
@@ -550,7 +561,7 @@ class FedAvgClient(BaseLeafClient):
 
 
 # ── Client registry ────────────────────────────────────────────────────────────
-CLIENT_REGISTRY = {"flash": FLASHClient, "flare": FLAREClient, "fedavg": FedAvgClient}
+CLIENT_REGISTRY = {"flash": FLASHClient, "fixedcompress": FixedCompressClient, "fedavg": FedAvgClient}
 
 # ── Persistent reconnect loop ──────────────────────────────────────────────────
 def run_client_loop(client: fl.client.NumPyClient, agg_address: str,
@@ -592,7 +603,7 @@ if __name__ == "__main__":
     print(f"[Client {args.cid}] Hardware: {hw_metrics.DEVICE}")
 
     if args.strategy == "all":
-        for strategy_name in ["flash", "flare", "fedavg"]:
+        for strategy_name in ["flash", "fixedcompress", "fedavg"]:
             print(f"[Client {args.cid}] Starting strategy: {strategy_name}")
             client = CLIENT_REGISTRY[strategy_name](args.cid, args.data_workers, args.num_clients)
             # Connect once for this experiment, retry on connection errors but

@@ -3,7 +3,7 @@ Research-quality figure generation for the FLASH HFL energy-efficiency paper.
 
 Loads CSVs from fl_results_hfl/, generates publication-ready figures in
 fl_results_hfl/figures/.  Designed for multi-strategy comparison (FLASH /
-FLARE / FedAvg); gracefully falls back to single-strategy when others are
+FixedCompress / FedAvg); gracefully falls back to single-strategy when others are
 absent.
 
 Usage:
@@ -47,7 +47,7 @@ COL2 = 7.16
 
 STRATEGY_STYLE = {
     "flash": dict(color="#1f77b4", marker="o", label="FLASH"),
-    "flare": dict(color="#ff7f0e", marker="s", label="FLARE"),
+    "fixedcompress": dict(color="#ff7f0e", marker="s", label="FixedCompress"),
     "fedavg": dict(color="#2ca02c", marker="^", label="FedAvg"),
 }
 
@@ -452,7 +452,7 @@ def main():
     results_dir = Path(args.results_dir)
     out_dir = Path(args.out_dir)
 
-    strategies = ["flash", "flare", "fedavg"]
+    strategies = ["flash", "fixedcompress", "fedavg"]
     data = {}
     for s in strategies:
         dfs = load_strategy(results_dir, s)

@@ -258,6 +258,18 @@ class _InnerStrategy(FedAvg):
                 decompressed.append((client, fit_res))
             results = decompressed
 
+        # FixedCompress sends compressed full weights (no delta) — just decompress
+        elif self.strategy_name == "fixedcompress":
+            decompressed = []
+            for client, fit_res in results:
+                r = fit_res.metrics.get("compression_ratio_applied", 1.0)
+                if r < 1.0:
+                    raw = parameters_to_ndarrays(fit_res.parameters)
+                    full = decompress_topk(raw)
+                    fit_res = dataclasses.replace(fit_res, parameters=ndarrays_to_parameters(full))
+                decompressed.append((client, fit_res))
+            results = decompressed
+
         # Task 7: update per-client latency history for jitter detection
         for client, fit_res in results:
             fit_time = fit_res.metrics.get("fit_wall_time_s", 0.0)
@@ -454,7 +466,7 @@ class AggregatorClient(fl.client.NumPyClient):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HFL aggregator (Jetson Xavier)")
     parser.add_argument("--strategy", type=str, default="flash",
-                        choices=["flash", "flare", "fedavg", "all"])
+                        choices=["flash", "fixedcompress", "fedavg", "all"])
     parser.add_argument("--agg-port", type=int, default=8081)
     parser.add_argument("--server-address", type=str, default="localhost:8080")
     parser.add_argument("--rounds", type=int, default=60,
@@ -476,7 +488,7 @@ if __name__ == "__main__":
         print(f"    {k}: {v:.4f}")
     print()
 
-    strategies = ["flash", "flare", "fedavg"] if args.strategy == "all" else [args.strategy]
+    strategies = ["flash", "fixedcompress", "fedavg"] if args.strategy == "all" else [args.strategy]
 
     for strategy_name in strategies:
         print(f"\n[Aggregator] Starting strategy: {strategy_name}")

@@ -189,8 +189,8 @@ class FLASHGlobalStrategy(FedAvg):
         return super().aggregate_fit(server_round, results, failures)
 
 
-# -- FLARE global strategy ------------------------------------------------------
-class FLAREGlobalStrategy(FedAvg):
+# -- FixedCompress global strategy ----------------------------------------------
+class FixedCompressGlobalStrategy(FedAvg):
     def configure_fit(self, server_round, parameters, client_manager):
         aggs = client_manager.sample(
             num_clients=self.min_fit_clients,
@@ -267,7 +267,7 @@ PLOT_SPECS = [
 
 COLORS = {
     "FLASH (HFL)": "#e63946",
-    "FLARE (HFL)": "#2a9d8f",
+    "FixedCompress (HFL)": "#2a9d8f",
     "FedAvg (HFL)": "#457b9d",
 }
 
@@ -343,7 +343,7 @@ if __name__ == "__main__":
     parser.add_argument("--port",        type=int, default=8080)
     parser.add_argument("--output-dir",  type=str, default="./fl_results_hfl")
     parser.add_argument("--experiment",  type=str, default="all",
-                        choices=["flash", "flare", "fedavg", "all"])
+                        choices=["flash", "fixedcompress", "fedavg", "all"])
     parser.add_argument("--aggregators",  type=int, default=NUM_AGGREGATORS,
                         help="Number of mid-tier aggregators (default: 5)")
     parser.add_argument("--no-wait",     action="store_true",
@@ -383,7 +383,7 @@ if __name__ == "__main__":
                       num_rounds=args.rounds,
                       fixed_r=args.fixed_r,
                       **common),
-        "flare":  lambda: FLAREGlobalStrategy(**common),
+        "fixedcompress": lambda: FixedCompressGlobalStrategy(**common),
         "fedavg": lambda: FedAvg(**common),
     }
 
