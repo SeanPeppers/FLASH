@@ -351,9 +351,16 @@ def fig_accuracy_vs_energy(data: dict, out_dir: Path):
         if "accuracy" not in em.columns:
             continue
 
-        ecol = "energy_joules" if "energy_joules" in fit.columns else "leaf_energy_joules"
-        merged = pd.merge(fit[["round", ecol]], em[["round", "accuracy"]], on="round", how="inner")
-        cum_e_kj = merged[ecol].cumsum() / 1000  # kJ
+        # Sum all available tier energies for a true system-wide efficiency curve
+        e_cols = [c for c in ["leaf_energy_joules", "agg_energy_joules"] if c in fit.columns]
+        if not e_cols:
+            e_cols = ["energy_joules"] if "energy_joules" in fit.columns else []
+        if not e_cols:
+            continue
+        fit_e = fit[["round"] + e_cols].copy()
+        fit_e["_total_e"] = fit_e[e_cols].sum(axis=1)
+        merged = pd.merge(fit_e[["round", "_total_e"]], em[["round", "accuracy"]], on="round", how="inner")
+        cum_e_kj = merged["_total_e"].cumsum() / 1000  # kJ
         sty = STRATEGY_STYLE[strat]
         ax.plot(cum_e_kj, merged["accuracy"] * 100,
                 color=sty["color"], marker=sty["marker"],
