@@ -45,8 +45,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import flwr as fl
-from collections import OrderedDict
-
 import logging
 
 import hw_metrics
