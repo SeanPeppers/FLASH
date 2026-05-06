@@ -270,14 +270,16 @@ class _InnerStrategy(FedAvg):
                 decompressed.append((client, fit_res))
             results = decompressed
 
-        # adaMC sends per-layer adaptive compressed full weights; decompress with bias correction
+        # adaMC sends per-layer adaptive compressed full weights (not deltas) — decompress without
+        # bias correction. Bias correction inflates each weight by n/k every round, which compounds
+        # into exponential weight explosion when applied to full parameters instead of gradients.
         elif self.strategy_name == "adamc":
             decompressed = []
             for client, fit_res in results:
                 r = fit_res.metrics.get("compression_ratio_applied", 1.0)
                 if r < 1.0:
                     raw = parameters_to_ndarrays(fit_res.parameters)
-                    full = decompress_topk(raw, bias_correct=True)
+                    full = decompress_topk(raw, bias_correct=False)
                     fit_res = dataclasses.replace(fit_res, parameters=ndarrays_to_parameters(full))
                 decompressed.append((client, fit_res))
             results = decompressed

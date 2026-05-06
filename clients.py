@@ -585,9 +585,16 @@ class FixedCompressClient(BaseLeafClient):
 
 
 # ── adaMC ──────────────────────────────────────────────────────────────────────
-# Simplified adaMC baseline: per-layer adaptive top-k on full weights at a global
-# budget of r=0.5. Budget is distributed proportional to layer L2 norm so
-# parameter-heavy layers retain more values. Decompressed with bias correction.
+# Simplified adaMC baseline (Adaptive Model Compression, IoT FL).
+#
+# Paper uses FTRL-trained auxiliary networks to derive per-layer sparsity masks and
+# applies bias correction to intermediate layer *outputs* client-side during training.
+# We approximate this with two simplifications appropriate for a research baseline:
+#   1. Per-layer ratio: L2 norm-proportional budget allocation instead of FTRL/aux nets.
+#   2. No output-layer bias correction (the FTRL mechanism is not practical to replicate).
+#
+# Transmission and aggregation match the paper exactly: compressed full weights (not
+# deltas) uploaded each round; server aggregates with standard FedAvg.
 ADAMC_GLOBAL_R = 0.5
 
 class adaMCClient(BaseLeafClient):
