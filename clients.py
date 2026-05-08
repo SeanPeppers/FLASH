@@ -36,7 +36,10 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import time
+import urllib.request
+import zipfile
 from contextlib import nullcontext
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
@@ -84,6 +87,30 @@ class SimpleNet(nn.Module):
 
     def forward(self, x):
         return self.classifier(self.features(x))
+
+
+class HARNet(nn.Module):
+    """1D-CNN for UCI-HAR raw inertial signals: input (batch, 9, 128), output 6 classes."""
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv1d(9, 64, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool1d(2),
+            nn.Conv1d(64, 128, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool1d(2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 32, 256), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(256, 6),
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+def _build_model(dataset: str) -> nn.Module:
+    if dataset == "ucihar":
+        return HARNet()
+    return SimpleNet()
 
 
 # ── Parameter helpers ──────────────────────────────────────────────────────────
@@ -195,14 +222,10 @@ def compressed_size_bytes(packed_params: List[np.ndarray]) -> float:
 
 
 
-# ── Data loader ────────────────────────────────────────────────────────────────
-def load_data(
-    cid: int, data_workers: int = 0, num_total_clients: int = 100
+# ── Data loaders ───────────────────────────────────────────────────────────────
+def _load_mnist(
+    cid: int, data_workers: int, num_total_clients: int
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
-    """
-    Load pre-downloaded MNIST. Raises a clear error if data is missing
-    rather than silently trying to download mid-experiment.
-    """
     try:
         from torchvision import datasets, transforms
         transform = transforms.Compose([
@@ -212,24 +235,15 @@ def load_data(
         train_full = datasets.MNIST(DATA_DIR, train=True, download=True, transform=transform)
         test_full  = datasets.MNIST(DATA_DIR, train=False, download=True, transform=transform)
     except Exception as e:
-        print(
-            f"[Client {cid}] ERROR loading MNIST from {DATA_DIR}: {e}\n"
-            f"  Run this first:\n"
+        raise RuntimeError(
+            f"[Client {cid}] Failed to load MNIST from {DATA_DIR}: {e}\n"
+            f"  Pre-download with:\n"
             f"  python -c \"from torchvision.datasets import MNIST; "
-            f"MNIST('{DATA_DIR}', download=True)\"\n"
-            f"  Falling back to synthetic data."
-        )
-        x = torch.randn(2000, 1, 28, 28)
-        y = torch.randint(0, 10, (2000,))
-        ds = torch.utils.data.TensorDataset(x, y)
-        ldr = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True)
-        return ldr, ldr
+            f"MNIST('{DATA_DIR}', download=True)\""
+        ) from e
 
-    # Non-overlapping shard: each client gets every Nth sample (N = num_total_clients)
     indices = [i for i in range(len(train_full)) if i % num_total_clients == cid]
     train_ds = torch.utils.data.Subset(train_full, indices)
-
-    # pin_memory=True helps on Jetson Nano (CUDA), no-op on Pi 5 (CPU only)
     pin = torch.cuda.is_available()
     train_loader = torch.utils.data.DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True,
@@ -241,6 +255,115 @@ def load_data(
     )
     print(f"[Client {cid}] Loaded MNIST shard: {len(train_ds)} train / {len(test_full)} test")
     return train_loader, test_loader
+
+
+_UCIHAR_URL = (
+    "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
+)
+
+
+def _ensure_ucihar() -> str:
+    """Download and extract UCI-HAR if not present. Returns the dataset root path."""
+    dataset_root = os.path.join(DATA_DIR, "UCI HAR Dataset")
+    sentinel = os.path.join(dataset_root, "train", "X_train.txt")
+    if os.path.exists(sentinel):
+        return dataset_root
+
+    zip_path = os.path.join(DATA_DIR, "ucihar.zip")
+    print(f"[UCI-HAR] Downloading dataset from UCI ML Repository ...")
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        urllib.request.urlretrieve(_UCIHAR_URL, zip_path)
+    except Exception as e:
+        raise RuntimeError(
+            f"[UCI-HAR] Download failed: {e}\n"
+            f"  Download manually from:\n    {_UCIHAR_URL}\n"
+            f"  and extract to {DATA_DIR}/"
+        ) from e
+
+    print(f"[UCI-HAR] Extracting to {DATA_DIR}/ ...")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(DATA_DIR)
+    os.remove(zip_path)
+
+    if not os.path.exists(sentinel):
+        raise RuntimeError(
+            f"[UCI-HAR] Extraction completed but expected file not found: {sentinel}\n"
+            f"  Check that the zip extracted to '{dataset_root}/'"
+        )
+    print(f"[UCI-HAR] Dataset ready at {dataset_root}")
+    return dataset_root
+
+
+def _load_ucihar_split(root: str, split: str):
+    import numpy as _np
+    # Raw inertial signals: 9 sensor files × (n_samples, 128 timesteps)
+    signal_dir = os.path.join(root, split, "Inertial Signals")
+    signal_files = [
+        f"body_acc_x_{split}.txt", f"body_acc_y_{split}.txt", f"body_acc_z_{split}.txt",
+        f"body_gyro_x_{split}.txt", f"body_gyro_y_{split}.txt", f"body_gyro_z_{split}.txt",
+        f"total_acc_x_{split}.txt", f"total_acc_y_{split}.txt", f"total_acc_z_{split}.txt",
+    ]
+    channels = [_np.loadtxt(os.path.join(signal_dir, f)) for f in signal_files]
+    X = _np.stack(channels, axis=1).astype(_np.float32)  # (n_samples, 9, 128)
+    y = _np.loadtxt(os.path.join(root, split, f"y_{split}.txt"), dtype=_np.int64) - 1
+    return X, y
+
+
+def _load_ucihar(
+    cid: int, data_workers: int, num_total_clients: int
+) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+    root = _ensure_ucihar()
+    X_train, y_train = _load_ucihar_split(root, "train")
+    X_test, y_test   = _load_ucihar_split(root, "test")
+
+    indices = [i for i in range(len(X_train)) if i % num_total_clients == cid]
+    X_shard = torch.tensor(X_train[indices])
+    y_shard = torch.tensor(y_train[indices])
+
+    train_ds = torch.utils.data.TensorDataset(X_shard, y_shard)
+    test_ds  = torch.utils.data.TensorDataset(torch.tensor(X_test), torch.tensor(y_test))
+    pin = torch.cuda.is_available()
+    train_loader = torch.utils.data.DataLoader(
+        train_ds, batch_size=BATCH_SIZE, shuffle=True,
+        num_workers=data_workers, pin_memory=pin,
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_ds, batch_size=256, shuffle=False,
+        num_workers=data_workers, pin_memory=pin,
+    )
+    print(f"[Client {cid}] Loaded UCI-HAR shard: {len(train_ds)} train / {len(test_ds)} test")
+    return train_loader, test_loader
+
+
+def load_data(
+    cid: int, data_workers: int = 0, num_total_clients: int = 100, dataset: str = "mnist"
+) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+    if dataset == "ucihar":
+        return _load_ucihar(cid, data_workers, num_total_clients)
+    return _load_mnist(cid, data_workers, num_total_clients)
+
+
+def load_test_only(dataset: str = "mnist") -> torch.utils.data.DataLoader:
+    """Load only the test split — used by the aggregator for server-side evaluation."""
+    if dataset == "ucihar":
+        root = _ensure_ucihar()
+        X_test, y_test = _load_ucihar_split(root, "test")
+        test_ds = torch.utils.data.TensorDataset(
+            torch.tensor(X_test), torch.tensor(y_test)
+        )
+        loader = torch.utils.data.DataLoader(test_ds, batch_size=256, shuffle=False)
+        print(f"[Aggregator] Loaded UCI-HAR test set: {len(test_ds)} samples for evaluation")
+        return loader
+    from torchvision import datasets, transforms
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)),
+    ])
+    test_ds = datasets.MNIST(DATA_DIR, train=False, download=True, transform=transform)
+    loader = torch.utils.data.DataLoader(test_ds, batch_size=256, shuffle=False)
+    print(f"[Aggregator] Loaded MNIST test set: {len(test_ds)} samples for evaluation")
+    return loader
 
 
 # ── Per-epoch training ─────────────────────────────────────────────────────────
@@ -408,14 +531,14 @@ def build_metrics(
 
 # ── Base leaf client ───────────────────────────────────────────────────────────
 class BaseLeafClient(fl.client.NumPyClient):
-    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100):
+    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100, dataset: str = "mnist"):
         self.client_id = client_id
         self.cid_int = int(client_id)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = SimpleNet().to(self.device)
+        self.model = _build_model(dataset).to(self.device)
         self.criterion = nn.CrossEntropyLoss()
         self.base_lr = 0.001
-        self.train_loader, self.test_loader = load_data(self.cid_int, data_workers, num_total_clients)
+        self.train_loader, self.test_loader = load_data(self.cid_int, data_workers, num_total_clients, dataset)
         # GradScaler for FP16 mixed-precision training on CUDA devices (no-op on CPU)
         self.scaler: Optional[torch.cuda.amp.GradScaler] = (
             torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
@@ -444,8 +567,8 @@ class BaseLeafClient(fl.client.NumPyClient):
 
 # ── FLASH ──────────────────────────────────────────────────────────────────────
 class FLASHClient(BaseLeafClient):
-    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100):
-        super().__init__(client_id, data_workers, num_total_clients)
+    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100, dataset: str = "mnist"):
+        super().__init__(client_id, data_workers, num_total_clients, dataset)
         self._base_params: Optional[List[np.ndarray]] = None
         # Error feedback buffer: accumulates values dropped by top-k each round
         # and adds them to the next round's delta so nothing is permanently lost.
@@ -710,16 +833,16 @@ if __name__ == "__main__":
                         help="Total number of leaf clients in the experiment (controls data sharding).")
     parser.add_argument("--reconnect-delay", type=float, default=5.0,
                         help="Seconds to wait before reconnecting after a round ends.")
+    parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "ucihar"],
+                        help="Dataset to use for training and evaluation.")
     args = parser.parse_args()
 
-    print(f"[Client {args.cid}] Hardware: {hw_metrics.DEVICE}")
+    print(f"[Client {args.cid}] Hardware: {hw_metrics.DEVICE}  Dataset: {args.dataset}")
 
     if args.strategy == "all":
         for strategy_name in ["flash", "fixedcompress", "fedavg", "adamc"]:
             print(f"[Client {args.cid}] Starting strategy: {strategy_name}")
-            client = CLIENT_REGISTRY[strategy_name](args.cid, args.data_workers, args.num_clients)
-            # Connect once for this experiment, retry on connection errors but
-            # do not loop forever — move to next strategy once server disconnects us
+            client = CLIENT_REGISTRY[strategy_name](args.cid, args.data_workers, args.num_clients, args.dataset)
             while True:
                 try:
                     print(f"[Client {args.cid}] Connecting to aggregator at {args.agg_address} ...")
@@ -731,5 +854,5 @@ if __name__ == "__main__":
                     time.sleep(args.reconnect_delay)
         print(f"[Client {args.cid}] All strategies done.")
     else:
-        client = CLIENT_REGISTRY[args.strategy](args.cid, args.data_workers, args.num_clients)
+        client = CLIENT_REGISTRY[args.strategy](args.cid, args.data_workers, args.num_clients, args.dataset)
         run_client_loop(client, args.agg_address, args.reconnect_delay)

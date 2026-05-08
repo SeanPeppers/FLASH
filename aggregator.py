@@ -56,6 +56,7 @@ from clients import (
     SimpleNet, get_parameters, set_parameters, model_size_bytes,
     TARGET_TAU, COMPRESSION_OPTIONS, MAX_LOCAL_EPOCHS,
     decompress_topk, compress_topk_adaptive, evaluate_model, DATA_DIR,
+    _build_model, load_test_only,
 )
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -368,31 +369,20 @@ class AggregatorClient(fl.client.NumPyClient):
       4. Returns everything to the global server
     """
 
-    def __init__(self, inner_strategy: _InnerStrategy, num_leaf_clients: int = NUM_LEAF_CLIENTS):
+    def __init__(self, inner_strategy: _InnerStrategy, num_leaf_clients: int = NUM_LEAF_CLIENTS, dataset: str = "mnist"):
         self.inner_strategy = inner_strategy
         self.num_leaf_clients = num_leaf_clients
-        self.model = SimpleNet()
+        self.model = _build_model(dataset)
         self._round = 0
         self.criterion = torch.nn.CrossEntropyLoss()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
-        self.test_loader = self._load_mnist_test()
-        print(f"[Aggregator] Xavier ({hw_metrics.DEVICE})  strategy={inner_strategy.strategy_name}")
-
-    def _load_mnist_test(self):
         try:
-            from torchvision import datasets, transforms
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.1307,), (0.3081,)),
-            ])
-            test_ds = datasets.MNIST(DATA_DIR, train=False, download=True, transform=transform)
-            loader = torch.utils.data.DataLoader(test_ds, batch_size=256, shuffle=False)
-            print(f"[Aggregator] Loaded MNIST test set: {len(test_ds)} samples for evaluation")
-            return loader
+            self.test_loader = load_test_only(dataset)
         except Exception as e:
-            print(f"[Aggregator] WARNING: Could not load MNIST test set ({e}). Eval will use dummy data.")
-            return None
+            print(f"[Aggregator] WARNING: Could not load {dataset} test set ({e}). Eval will use dummy data.")
+            self.test_loader = None
+        print(f"[Aggregator] Xavier ({hw_metrics.DEVICE})  strategy={inner_strategy.strategy_name}  dataset={dataset}")
 
     def get_parameters(self, config):
         return get_parameters(self.model)
@@ -503,6 +493,8 @@ if __name__ == "__main__":
                         help="Number of leaf clients connecting to this aggregator (default: 20)")
     parser.add_argument("--between-wait", type=int, default=600,
                         help="Seconds to wait between strategies when running --strategy all (default: 600)")
+    parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "ucihar"],
+                        help="Dataset used for training and evaluation (must match clients).")
     args = parser.parse_args()
 
     inner_addr = f"0.0.0.0:{args.agg_port}"
@@ -519,7 +511,7 @@ if __name__ == "__main__":
         print(f"\n[Aggregator] Starting strategy: {strategy_name}")
 
         # Build a fresh inner strategy for this experiment
-        init_model  = SimpleNet()
+        init_model  = _build_model(args.dataset)
         init_params = ndarrays_to_parameters(get_parameters(init_model))
 
         inner_strategy = _InnerStrategy(
@@ -563,11 +555,11 @@ if __name__ == "__main__":
         print(f"[Aggregator] Leaf clients should connect to: {leaf_addr}")
         for _cid in range(args.leaf_clients):
             print(f"    python clients.py --cid {_cid} --num-clients 100 "
-                  f"--agg-address {leaf_addr} --strategy {strategy_name}")
+                  f"--agg-address {leaf_addr} --strategy {strategy_name} --dataset {args.dataset}")
         print()
 
         # Connect upstream to the global server as a Flower client
-        agg_client = AggregatorClient(inner_strategy, args.leaf_clients)
+        agg_client = AggregatorClient(inner_strategy, args.leaf_clients, args.dataset)
         print(f"[Aggregator] Connecting to global server at {args.server_address} ...")
         fl.client.start_numpy_client(server_address=args.server_address, client=agg_client)
 
