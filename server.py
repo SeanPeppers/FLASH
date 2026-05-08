@@ -38,7 +38,7 @@ from flwr.server.strategy import FedAvg
 
 import hw_metrics
 from hw_metrics import EnergyAccumulator, snapshot, delta
-from clients import SimpleNet, get_parameters, TARGET_TAU, COMPRESSION_OPTIONS
+from clients import SimpleNet, get_parameters, TARGET_TAU, COMPRESSION_OPTIONS, _build_model
 
 # -- Configuration --------------------------------------------------------------
 NUM_ROUNDS = 60
@@ -366,6 +366,8 @@ if __name__ == "__main__":
     parser.add_argument("--fixed-r",     type=float, default=None,
                         help="Force a fixed compression ratio hint for ablation study "
                              "(e.g. 0.25, 0.5, 0.75, 1.0). Passed to aggregators via config.")
+    parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "ucihar"],
+                        help="Dataset used for training — determines initial model architecture.")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -378,7 +380,7 @@ if __name__ == "__main__":
         print(f"    {k}: {v:.4f}")
     print()
 
-    init_params = ndarrays_to_parameters(get_parameters(SimpleNet()))
+    init_params = ndarrays_to_parameters(get_parameters(_build_model(args.dataset)))
     common = dict(
         min_fit_clients=args.aggregators,
         min_evaluate_clients=args.aggregators,
