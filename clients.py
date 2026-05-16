@@ -223,8 +223,32 @@ def compressed_size_bytes(packed_params: List[np.ndarray]) -> float:
 
 
 # ── Data loaders ───────────────────────────────────────────────────────────────
+def _dirichlet_partition(
+    labels: np.ndarray, cid: int, num_clients: int, alpha: float, seed: int = 42
+) -> List[int]:
+    """Dirichlet label-distribution partition for non-IID FL evaluation.
+
+    Splits training indices across `num_clients` by sampling label proportions
+    from Dir(alpha). Smaller alpha = more skewed (alpha=0.1 is near-pathological,
+    alpha=0.5 is moderate, alpha=1.0 approaches IID). Seed is fixed so every
+    client in an experiment sees a consistent, reproducible split.
+    """
+    rng = np.random.default_rng(seed)
+    classes = np.unique(labels)
+    per_client: List[List[int]] = [[] for _ in range(num_clients)]
+    for c in classes:
+        class_idx = np.where(labels == c)[0]
+        rng.shuffle(class_idx)
+        proportions = rng.dirichlet(alpha * np.ones(num_clients))
+        splits = (np.cumsum(proportions) * len(class_idx)).astype(int)[:-1]
+        for i, chunk in enumerate(np.split(class_idx, splits)):
+            per_client[i].extend(chunk.tolist())
+    return per_client[cid]
+
+
 def _load_mnist(
-    cid: int, data_workers: int, num_total_clients: int
+    cid: int, data_workers: int, num_total_clients: int,
+    dirichlet_alpha: Optional[float] = None,
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     try:
         from torchvision import datasets, transforms
@@ -242,7 +266,15 @@ def _load_mnist(
             f"MNIST('{DATA_DIR}', download=True)\""
         ) from e
 
-    indices = [i for i in range(len(train_full)) if i % num_total_clients == cid]
+    if dirichlet_alpha is not None:
+        indices = _dirichlet_partition(
+            np.array(train_full.targets), cid, num_total_clients, dirichlet_alpha
+        )
+        partition = "non-IID Dir(a={:.2f})".format(dirichlet_alpha)
+    else:
+        indices = [i for i in range(len(train_full)) if i % num_total_clients == cid]
+        partition = "IID"
+
     train_ds = torch.utils.data.Subset(train_full, indices)
     pin = torch.cuda.is_available()
     train_loader = torch.utils.data.DataLoader(
@@ -253,7 +285,7 @@ def _load_mnist(
         test_full, batch_size=256, shuffle=False,
         num_workers=data_workers, pin_memory=pin,
     )
-    print(f"[Client {cid}] Loaded MNIST shard: {len(train_ds)} train / {len(test_full)} test")
+    print(f"[Client {cid}] Loaded MNIST shard ({partition}): {len(train_ds)} train / {len(test_full)} test")
     return train_loader, test_loader
 
 
@@ -311,13 +343,20 @@ def _load_ucihar_split(root: str, split: str):
 
 
 def _load_ucihar(
-    cid: int, data_workers: int, num_total_clients: int
+    cid: int, data_workers: int, num_total_clients: int,
+    dirichlet_alpha: Optional[float] = None,
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     root = _ensure_ucihar()
     X_train, y_train = _load_ucihar_split(root, "train")
     X_test, y_test   = _load_ucihar_split(root, "test")
 
-    indices = [i for i in range(len(X_train)) if i % num_total_clients == cid]
+    if dirichlet_alpha is not None:
+        indices = _dirichlet_partition(y_train, cid, num_total_clients, dirichlet_alpha)
+        partition = "non-IID Dir(a={:.2f})".format(dirichlet_alpha)
+    else:
+        indices = [i for i in range(len(X_train)) if i % num_total_clients == cid]
+        partition = "IID"
+
     X_shard = torch.tensor(X_train[indices])
     y_shard = torch.tensor(y_train[indices])
 
@@ -332,16 +371,17 @@ def _load_ucihar(
         test_ds, batch_size=256, shuffle=False,
         num_workers=data_workers, pin_memory=pin,
     )
-    print(f"[Client {cid}] Loaded UCI-HAR shard: {len(train_ds)} train / {len(test_ds)} test")
+    print(f"[Client {cid}] Loaded UCI-HAR shard ({partition}): {len(train_ds)} train / {len(test_ds)} test")
     return train_loader, test_loader
 
 
 def load_data(
-    cid: int, data_workers: int = 0, num_total_clients: int = 100, dataset: str = "mnist"
+    cid: int, data_workers: int = 0, num_total_clients: int = 100,
+    dataset: str = "mnist", dirichlet_alpha: Optional[float] = None,
 ) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     if dataset == "ucihar":
-        return _load_ucihar(cid, data_workers, num_total_clients)
-    return _load_mnist(cid, data_workers, num_total_clients)
+        return _load_ucihar(cid, data_workers, num_total_clients, dirichlet_alpha)
+    return _load_mnist(cid, data_workers, num_total_clients, dirichlet_alpha)
 
 
 def load_test_only(dataset: str = "mnist") -> torch.utils.data.DataLoader:
@@ -531,14 +571,17 @@ def build_metrics(
 
 # ── Base leaf client ───────────────────────────────────────────────────────────
 class BaseLeafClient(fl.client.NumPyClient):
-    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100, dataset: str = "mnist"):
+    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100,
+                 dataset: str = "mnist", dirichlet_alpha: Optional[float] = None):
         self.client_id = client_id
         self.cid_int = int(client_id)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = _build_model(dataset).to(self.device)
         self.criterion = nn.CrossEntropyLoss()
         self.base_lr = 0.001
-        self.train_loader, self.test_loader = load_data(self.cid_int, data_workers, num_total_clients, dataset)
+        self.train_loader, self.test_loader = load_data(
+            self.cid_int, data_workers, num_total_clients, dataset, dirichlet_alpha
+        )
         # GradScaler for FP16 mixed-precision training on CUDA devices (no-op on CPU)
         self.scaler: Optional[torch.cuda.amp.GradScaler] = (
             torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
@@ -567,8 +610,9 @@ class BaseLeafClient(fl.client.NumPyClient):
 
 # ── FLASH ──────────────────────────────────────────────────────────────────────
 class FLASHClient(BaseLeafClient):
-    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100, dataset: str = "mnist"):
-        super().__init__(client_id, data_workers, num_total_clients, dataset)
+    def __init__(self, client_id: str, data_workers: int = 0, num_total_clients: int = 100,
+                 dataset: str = "mnist", dirichlet_alpha: Optional[float] = None):
+        super().__init__(client_id, data_workers, num_total_clients, dataset, dirichlet_alpha)
         self._base_params: Optional[List[np.ndarray]] = None
         # Error feedback buffer: accumulates values dropped by top-k each round
         # and adds them to the next round's delta so nothing is permanently lost.
@@ -835,6 +879,9 @@ if __name__ == "__main__":
                         help="Seconds to wait before reconnecting after a round ends.")
     parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "ucihar"],
                         help="Dataset to use for training and evaluation.")
+    parser.add_argument("--dirichlet-alpha", type=float, default=None,
+                        help="Dirichlet concentration for non-IID partitioning (e.g. 0.5, 0.1). "
+                             "Omit for standard IID split.")
     args = parser.parse_args()
 
     print(f"[Client {args.cid}] Hardware: {hw_metrics.DEVICE}  Dataset: {args.dataset}")
@@ -842,7 +889,7 @@ if __name__ == "__main__":
     if args.strategy == "all":
         for strategy_name in ["flash", "fixedcompress", "fedavg", "adamc"]:
             print(f"[Client {args.cid}] Starting strategy: {strategy_name}")
-            client = CLIENT_REGISTRY[strategy_name](args.cid, args.data_workers, args.num_clients, args.dataset)
+            client = CLIENT_REGISTRY[strategy_name](args.cid, args.data_workers, args.num_clients, args.dataset, args.dirichlet_alpha)
             while True:
                 try:
                     print(f"[Client {args.cid}] Connecting to aggregator at {args.agg_address} ...")
@@ -854,5 +901,5 @@ if __name__ == "__main__":
                     time.sleep(args.reconnect_delay)
         print(f"[Client {args.cid}] All strategies done.")
     else:
-        client = CLIENT_REGISTRY[args.strategy](args.cid, args.data_workers, args.num_clients, args.dataset)
+        client = CLIENT_REGISTRY[args.strategy](args.cid, args.data_workers, args.num_clients, args.dataset, args.dirichlet_alpha)
         run_client_loop(client, args.agg_address, args.reconnect_delay)
